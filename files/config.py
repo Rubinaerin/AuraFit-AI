@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     secret_key: str = "change-this-in-production-use-openssl-rand-hex-32"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24
-    app_name: str = "FitnessAI API"
+    app_name: str = "AuraFit AI"
     debug: bool = False
 
     # LLM API anahtarları (ikisinden biri yeterli)

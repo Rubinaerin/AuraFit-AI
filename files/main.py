@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from ai_service import generate_workout_plan, preview_prompt, WorkoutPlanInput, HealthConditionInput, PostureMetricsInput
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from contextlib import asynccontextmanager
 from typing import Annotated
 from typing import Optional
@@ -28,6 +28,8 @@ from database import get_db
 from models import User
 from schemas import RegisterRequest, RegisterResponse, UserResponse, HealthConditionResponse
 from services import EmailAlreadyExistsError, register_user
+from chat_service import chat_with_coach, ChatInput, HealthConditionCtx, ActivePlanCtx
+from progress_service import compare_posture, CompareInput, BaselineMetrics
 
 settings = get_settings()
 security = HTTPBearer()
@@ -45,7 +47,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
-    description="AI destekli fitness uygulaması backend API'si",
+    description="AI-powered posture analysis and customized workout engine Backend API",
     lifespan=lifespan,
 )
 
@@ -416,4 +418,291 @@ async def preview_plan_prompt(
     return {
         "system_prompt_chars": len(prompts["system_prompt"]),
         "user_prompt": prompts["user_prompt"],
+    }
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Mevcut oturumu sürdürmek için doldurun. Boş bırakırsanız yeni oturum açılır."
+    )
+    # Aktif antrenman planı (opsiyonel — doldurulursa chatbot plana göre yanıt verir)
+    plan_name: Optional[str] = None
+    sessions_per_week: Optional[int] = None
+    primary_goal: Optional[str] = None
+    current_week: Optional[int] = None
+    current_week_exercises: list[str] = Field(default_factory=list)
+    preferred_provider: str = "auto"
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "message": "Bel fıtığım ağrıdı, deadlift'e alternatif ne önerirsin?",
+                "session_id": None,
+                "plan_name": "8 Haftalık Kilo Verme Programı",
+                "sessions_per_week": 3,
+                "primary_goal": "weight_loss",
+                "current_week": 2,
+                "current_week_exercises": ["Plank", "Bird-Dog", "Lat Pulldown"],
+                "preferred_provider": "auto",
+            }
+        }
+    )
+
+
+@app.post(
+    "/chat/message",
+    summary="AI Antrenör ile mesajlaş",
+    tags=["chatbot"],
+    responses={
+        200: {"description": "Antrenör yanıtı döndürüldü."},
+        401: {"description": "Token geçersiz."},
+        500: {"description": "LLM çağrısı başarısız."},
+    },
+)
+async def chat_message(
+    request: ChatRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Hafızalı chatbot endpoint'i.
+
+    Hafıza mekanizması:
+    - İlk mesajda session_id boş gelir → yeni UUID üretilir.
+    - Sonraki mesajlarda aynı session_id gönderilir.
+    - Her turda DB'den o oturumun son 20 mesajı çekilip LLM'e gönderilir.
+    - Böylece 'bel fıtığım ağrıdı' gibi önceki bağlam hatırlanır.
+    """
+    from sqlalchemy import select as sa_select
+
+    # ── Geçmiş mesajları DB'den çek ──────────────────────────────────────────
+    history: list[dict] = []
+    if request.session_id:
+        result = await db.execute(
+            sa_select(ChatMessage)
+            .where(ChatMessage.session_id == uuid.UUID(request.session_id))
+            .order_by(ChatMessage.sent_at)
+            .limit(20)
+        )
+        history = [
+            {"role": row.role, "content": row.content}
+            for row in result.scalars().all()
+            if row.role in ("user", "assistant")
+        ]
+
+    # ── Kullanıcı sağlık koşullarını dönüştür ──────────────────────────────
+    health_ctx = [
+        HealthConditionCtx(
+            condition_type=c.condition_type,
+            severity=c.severity,
+            affected_region=c.affected_region,
+        )
+        for c in current_user.health_conditions
+        if c.is_active
+    ]
+
+    # ── Aktif plan bağlamı (opsiyonel) ────────────────────────────────────
+    plan_ctx = None
+    if request.plan_name:
+        plan_ctx = ActivePlanCtx(
+            plan_name=request.plan_name,
+            sessions_per_week=request.sessions_per_week or 3,
+            primary_goal=request.primary_goal or current_user.primary_goal,
+            current_week=request.current_week or 1,
+            current_week_exercises=request.current_week_exercises,
+        )
+
+    # ── LLM çağrısı ──────────────────────────────────────────────────────
+    try:
+        out = await chat_with_coach(ChatInput(
+            user_id=str(current_user.id),
+            user_name=current_user.full_name,
+            message=request.message,
+            session_id=request.session_id,
+            health_conditions=health_ctx,
+            active_plan=plan_ctx,
+            history=history,
+            preferred_provider=request.preferred_provider,
+        ))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # ── Oturum yoksa oluştur ──────────────────────────────────────────────
+    if not request.session_id:
+        session_title = request.message[:80] + ("…" if len(request.message) > 80 else "")
+        db.add(ChatSession(
+            id=uuid.UUID(out.session_id),
+            user_id=current_user.id,
+            plan_id=None,
+            session_title=session_title,
+            is_active=True,
+        ))
+
+    # ── Her iki mesajı DB'ye kaydet ───────────────────────────────────────
+    db.add(ChatMessage(
+        session_id=uuid.UUID(out.session_id),
+        **out.user_db_row(),
+    ))
+    db.add(ChatMessage(
+        session_id=uuid.UUID(out.session_id),
+        **out.assistant_db_row(),
+    ))
+    await db.commit()
+
+    # ── Yanıt ────────────────────────────────────────────────────────────
+    return {
+        "reply":         out.reply,
+        "session_id":    out.session_id,
+        "tokens_used":   out.tokens_used,
+        "provider_used": out.provider_used,
+        # Egzersiz değişikliği talep edildiyse frontend bunu işler
+        "plan_update": (
+            {
+                "action":       out.plan_update.action,
+                "old_exercise": out.plan_update.old_exercise,
+                "new_exercise": out.plan_update.new_exercise,
+                "reason":       out.plan_update.reason,
+                "sets":         out.plan_update.sets,
+                "reps":         out.plan_update.reps,
+                "rest_seconds": out.plan_update.rest_seconds,
+            }
+            if out.plan_update else None
+        ),
+    }
+
+
+# ════════════════════════════════════════════════════════
+#  POST /analysis/posture/compare — Aylık Gelişim Raporu
+# ════════════════════════════════════════════════════════
+
+@app.post(
+    "/analysis/posture/compare",
+    summary="Aylık postür gelişim karşılaştırması",
+    tags=["analiz"],
+    responses={
+        200: {"description": "Gelişim raporu üretildi."},
+        404: {"description": "Baseline analiz kaydı bulunamadı."},
+        422: {"description": "Yeni fotoğrafta pose tespit edilemedi."},
+    },
+)
+async def compare_posture_endpoint(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    new_photo: UploadFile = File(..., description="Bu aydaki fotoğraf (JPG/PNG)"),
+    angle: str = Form("front", description="front | back | left | right"),
+    new_month_number: int = Form(..., description="Bu fotoğraf kaçıncı aya ait? (2, 3, 4...)"),
+    baseline_month: int = Form(1, description="Karşılaştırılacak baz ay (genellikle 1)"),
+    preferred_provider: str = Form("auto"),
+):
+    """
+    Gelişim karşılaştırma akışı:
+    1. DB'den baseline (baz ay) analiz kaydını çeker.
+    2. Yeni fotoğrafı cv_service ile analiz eder.
+    3. Metrikleri karşılaştırıp delta hesaplar.
+    4. LLM ile Türkçe gelişim raporu üretir.
+    5. Yeni analizi DB'ye kaydeder.
+    """
+    from sqlalchemy import select as sa_select
+
+    # ── Dosya validasyonu ─────────────────────────────────────────────────
+    if angle not in ("front", "back", "left", "right"):
+        raise HTTPException(status_code=422, detail="Geçersiz açı. front/back/left/right kullanın.")
+    if new_photo.content_type not in ("image/jpeg", "image/png", "image/webp"):
+        raise HTTPException(status_code=415, detail="Sadece JPG, PNG veya WebP kabul edilir.")
+
+    photo_bytes = await new_photo.read()
+    if len(photo_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Dosya 10 MB'dan büyük olamaz.")
+
+    # ── Baseline analizi DB'den çek ───────────────────────────────────────
+    baseline_row = await db.execute(
+        sa_select(PhotoAnalysis)
+        .join(ProgressPhoto, PhotoAnalysis.photo_id == ProgressPhoto.id)
+        .where(
+            ProgressPhoto.user_id == current_user.id,
+            ProgressPhoto.photo_angle == angle,
+            ProgressPhoto.month_number == baseline_month,
+        )
+        .order_by(PhotoAnalysis.analyzed_at.desc())
+        .limit(1)
+    )
+    baseline_analysis = baseline_row.scalar_one_or_none()
+
+    if not baseline_analysis:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Ay {baseline_month} için '{angle}' açısında baseline analiz kaydı bulunamadı. "
+                "Önce /analysis/posture/single endpoint'i ile başlangıç fotoğrafınızı yükleyin."
+            ),
+        )
+
+    # BaselineMetrics nesnesi oluştur
+    bm = baseline_analysis.body_measurements or {}
+    baseline = BaselineMetrics(
+        posture_score=float(baseline_analysis.posture_score or 0),
+        month_number=baseline_month,
+        photo_angle=angle,
+        shoulder_tilt_deg=bm.get("shoulder_tilt_deg"),
+        hip_tilt_deg=bm.get("hip_tilt_deg"),
+        spine_lateral_dev_deg=bm.get("spine_lateral_dev_deg"),
+        head_forward_deg=bm.get("head_forward_deg"),
+        torso_lean_deg=bm.get("torso_lean_deg"),
+        shoulder_width_ratio=bm.get("shoulder_width_ratio"),
+    )
+
+    # ── Karşılaştırmayı çalıştır ──────────────────────────────────────────
+    result = await compare_posture(CompareInput(
+        user_id=str(current_user.id),
+        user_name=current_user.full_name,
+        new_photo_bytes=photo_bytes,
+        photo_angle=angle,
+        new_month_number=new_month_number,
+        baseline=baseline,
+        preferred_provider=preferred_provider,
+    ))
+
+    if not result.success:
+        raise HTTPException(status_code=422, detail=result.error_message)
+
+    # ── Yeni fotoğraf kaydı oluştur ───────────────────────────────────────
+    new_photo_row = ProgressPhoto(
+        user_id=current_user.id,
+        photo_angle=angle,
+        storage_path=f"users/{current_user.id}/photos/month_{new_month_number}_{angle}.jpg",
+        storage_bucket="fitness-app-photos",
+        month_number=new_month_number,
+        weight_at_time_kg=None,     # Kullanıcı ileride ekleyebilir
+    )
+    db.add(new_photo_row)
+    await db.flush()  # ID'yi al
+
+    # ── Yeni analiz kaydını DB'ye yaz ─────────────────────────────────────
+    payload = result.new_analysis_db_payload.copy()
+    db.add(PhotoAnalysis(
+        photo_id=new_photo_row.id,
+        posture_landmarks=payload.get("posture_landmarks"),
+        body_measurements=payload.get("body_measurements"),
+        posture_score=result.new_posture_score,
+        comparison_delta=payload.get("comparison_delta"),   # Delta JSONB burada!
+    ))
+    await db.commit()
+
+    # ── Yanıt ────────────────────────────────────────────────────────────
+    d = result.delta
+    return {
+        "summary": result.summary_text(),
+        "scores": {
+            "baseline_month":  baseline_month,
+            "new_month":       new_month_number,
+            "baseline_score":  d.posture_score.baseline_value,
+            "new_score":       d.posture_score.new_value,
+            "score_change":    d.posture_score.delta,
+            "score_change_pct": d.posture_score.change_pct,
+        },
+        "metrics": result.delta.to_dict(),
+        "improved_count":  result.delta.improved_count(),
+        "worsened_count":  result.delta.worsened_count(),
+        "ai_report":       result.report,   # LLM'in ürettiği JSON raporu
+        "new_warnings":    result.delta.posture_score.new_value and [],   # Boş liste default
     }
