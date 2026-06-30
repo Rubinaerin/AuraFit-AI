@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from ai_service import generate_workout_plan, preview_prompt, WorkoutPlanInput, HealthConditionInput, PostureMetricsInput
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, EmailStr
 from contextlib import asynccontextmanager
 from typing import Annotated
 from typing import Optional
@@ -27,7 +27,7 @@ from config import get_settings
 from database import get_db
 from models import User
 from schemas import RegisterRequest, RegisterResponse, UserResponse, HealthConditionResponse
-from services import EmailAlreadyExistsError, register_user
+from services import EmailAlreadyExistsError, register_user, verify_password, create_access_token
 from chat_service import chat_with_coach, ChatInput, HealthConditionCtx, ActivePlanCtx
 from progress_service import compare_posture, CompareInput, BaselineMetrics
 
@@ -119,6 +119,67 @@ async def register(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"code": "INTERNAL_ERROR", "message": "Sunucu hatası. Lütfen tekrar deneyin."},
         )
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+@app.post(
+    "/auth/login",
+    response_model=RegisterResponse,   # reuses the same response shape as /auth/register
+    summary="Log in with email and password",
+    tags=["auth"],
+    responses={
+        200: {"description": "Login successful, JWT token returned."},
+        401: {"description": "Invalid email or password."},
+    },
+)
+async def login(
+    payload: LoginRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> RegisterResponse:
+    result = await db.execute(select(User).where(User.email == payload.email.lower()))
+    user = result.scalar_one_or_none()
+
+    # Same error for "no such user" and "wrong password" — avoids leaking
+    # which emails are registered (standard security practice).
+    invalid_creds = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={"code": "INVALID_CREDENTIALS", "message": "Incorrect email or password."},
+    )
+
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise invalid_creds
+
+    has_conditions = len(user.health_conditions) > 0
+    rehab_warning = has_conditions and user.primary_goal != "rehabilitation"
+
+    return RegisterResponse(
+        message="Login successful.",
+        user=UserResponse(
+            id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            gender=user.gender,
+            birth_year=user.birth_year,
+            height_cm=float(user.height_cm),
+            current_weight_kg=float(user.current_weight_kg),
+            target_weight_kg=float(user.target_weight_kg),
+            fitness_level=user.fitness_level,
+            primary_goal=user.primary_goal,
+            health_conditions=[
+                HealthConditionResponse(
+                    id=c.id, condition_type=c.condition_type, description=c.description,
+                    severity=c.severity, affected_region=c.affected_region, is_active=c.is_active,
+                )
+                for c in user.health_conditions
+            ],
+        ),
+        access_token=create_access_token(user.id),
+        token_type="bearer",
+        has_health_conditions=has_conditions,
+        rehabilitation_warning=rehab_warning,
+    )
 
 
 # ─── GET /users/me ───────────────────────────────────────────────────────────
