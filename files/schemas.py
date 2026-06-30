@@ -174,3 +174,10 @@ class RegisterResponse(BaseModel):
     token_type: str = "bearer"
     has_health_conditions: bool
     rehabilitation_warning: bool
+
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
+
+class UpdateProfileRequest(BaseModel):
+    physical_data: Optional[Dict[str, Any]] = None
+    health_conditions: Optional[List[Dict[str, Any]]] = None

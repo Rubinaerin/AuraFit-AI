@@ -26,8 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import get_settings
 from database import get_db
 from models import User
-from schemas import RegisterRequest, RegisterResponse, UserResponse, HealthConditionResponse
-from services import EmailAlreadyExistsError, register_user, verify_password, create_access_token
+from schemas import RegisterRequest, RegisterResponse, UserResponse, HealthConditionResponse, UpdateProfileRequest
+from services import EmailAlreadyExistsError, register_user, verify_password, create_access_token, update_user_profile
 from chat_service import chat_with_coach, ChatInput, HealthConditionCtx, ActivePlanCtx
 from progress_service import compare_posture, CompareInput, BaselineMetrics
 
@@ -221,6 +221,38 @@ async def get_me(
         ],
     )
 
+@app.patch(
+    "/users/me",
+    response_model=UserResponse,
+    summary="Update physical data and/or health conditions",
+    tags=["kullanıcı"],
+)
+async def update_me(
+    payload: UpdateProfileRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> UserResponse:
+    updated_user = await update_user_profile(db, current_user, payload)
+
+    return UserResponse(
+        id=updated_user.id,
+        email=updated_user.email,
+        full_name=updated_user.full_name,
+        gender=updated_user.gender,
+        birth_year=updated_user.birth_year,
+        height_cm=float(updated_user.height_cm),
+        current_weight_kg=float(updated_user.current_weight_kg),
+        target_weight_kg=float(updated_user.target_weight_kg),
+        fitness_level=updated_user.fitness_level,
+        primary_goal=updated_user.primary_goal,
+        health_conditions=[
+            HealthConditionResponse(
+                id=c.id, condition_type=c.condition_type, description=c.description,
+                severity=c.severity, affected_region=c.affected_region, is_active=c.is_active,
+            )
+            for c in updated_user.health_conditions
+        ],
+    )
 
 # ─── GET /health ─────────────────────────────────────────────────────────────
 

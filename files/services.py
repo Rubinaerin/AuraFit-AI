@@ -114,3 +114,35 @@ class EmailAlreadyExistsError(Exception):
     def __init__(self, email: str):
         self.email = email
         super().__init__(f"Bu e-posta adresi zaten kayitli: {email}")
+
+from models import User, UserHealthCondition # En altta modellerin import edildiğinden emin olalım
+
+async def update_user_profile(db, user: User, data: UpdateProfileRequest) -> User:
+    if data.physical_data:
+        pd = data.physical_data
+        user.height_cm = pd.get("height_cm", user.height_cm)
+        user.current_weight_kg = pd.get("current_weight_kg", user.current_weight_kg)
+        user.target_weight_kg = pd.get("target_weight_kg", user.target_weight_kg)
+        user.gender = pd.get("gender", user.gender)
+        user.fitness_level = pd.get("fitness_level", user.fitness_level)
+        user.primary_goal = pd.get("primary_goal", user.primary_goal)
+
+    if data.health_conditions is not None:
+        # Mevcut sakatlıkları temizle
+        for existing in list(user.health_conditions):
+            await db.delete(existing)
+        await db.flush()
+
+        # Yeni gelen sakatlık listesini ekle
+        for cond in data.health_conditions:
+            db.add(UserHealthCondition(
+                user_id=user.id,
+                condition_type=cond.get("condition_type"),
+                description=cond.get("description"),
+                severity=cond.get("severity"),
+                affected_region=cond.get("affected_region"),
+            ))
+
+    await db.commit()
+    await db.refresh(user)
+    return user
