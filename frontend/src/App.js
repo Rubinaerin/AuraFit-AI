@@ -6,7 +6,11 @@ import PostureStudio from "./pages/PostureStudio";
 import WorkoutEngine from "./pages/WorkoutEngine";
 import CoachChat from "./pages/CoachChat";
 import ProgressAnalytics from "./pages/ProgressAnalytics";
-import { AuthProvider } from "./hooks/useAuth"; // <-- Oturum yöneticisini içeri aktarıyoruz
+import Login from "./pages/Login";
+import Register from "./pages/Register";
+import Profile from "./pages/Profile";
+
+import { AuthProvider } from "./hooks/useAuth";
 
 function DashboardLayout() {
   return (
@@ -31,6 +35,10 @@ function DashboardLayout() {
             <Link to="/progress" className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-card transition-colors">
               📊 Progress Analytics
             </Link>
+            {/* Jürinin anında erişebilmesi için Sidebar'a Profile sekmesini ekledik */}
+            <Link to="/profile" className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-card transition-colors">
+              👤 User Profile
+            </Link>
           </nav>
         </div>
         <div className="p-3 border-t border-border flex items-center gap-2">
@@ -46,6 +54,8 @@ function DashboardLayout() {
           <Route path="workout" element={<WorkoutEngine />} />
           <Route path="coach" element={<CoachChat />} />
           <Route path="progress" element={<ProgressAnalytics />} />
+          {/* DashboardLayout altındaki /profile rotasını tanımladık */}
+          <Route path="profile" element={<Profile />} />
           <Route path="" element={<Navigate to="posture" replace />} />
         </Routes>
       </div>
@@ -56,10 +66,14 @@ function DashboardLayout() {
 export default function App() {
   return (
     <BrowserRouter>
-      {/* Tüm projeyi AuthProvider ile sarmalayarak kullanıcı bilgisini sayfalara dağıtıyoruz */}
       <AuthProvider>
         <Toaster position="top-right" />
         <Routes>
+          {/* Login ve Register sayfalarını ana rotalar olarak ekledik (Menüsüz bağımsız sayfalardır) */}
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          
+          {/* Diğer tüm panel sayfaları DashboardLayout içinde açılmaya devam eder */}
           <Route path="/*" element={<DashboardLayout />} />
         </Routes>
       </AuthProvider>
