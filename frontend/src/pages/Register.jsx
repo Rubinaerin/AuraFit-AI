@@ -217,23 +217,26 @@ export default function Register() {
       const payload = {
         user: {
           email:     email.trim().toLowerCase(),
-          password,
+          password:  password,
           full_name: fullName.trim(),
         },
         physical_data: {
           height_cm:          Number(heightCm),
           current_weight_kg:  Number(currentWeight),
           target_weight_kg:   Number(targetWeight),
-          gender,
+          gender:             gender, // "male", "female", "other" (GenderEnum ile tam uyumlu)
           birth_year:         Number(birthYear),
-          fitness_level:      fitnessLevel,
-          primary_goal:       primaryGoal,
+          fitness_level:      fitnessLevel, // "beginner", "intermediate", "advanced"
+          primary_goal:       primaryGoal, // "weight_loss", "muscle_gain" vb.
         },
+        // Backend HealthConditionSchema'nın tam olarak beklediği alan adları:
         health_conditions: selectedConditions.map((condType) => ({
-          condition_type:  condType,
+          condition_type:  condType, // schemas.py içindeki ConditionTypeEnum ile birebir eşleşir
           severity:        severityMap[condType] || "moderate",
-          description:     null,
-          affected_region: null,
+          description:     `User self-reported ${condType} during registration.`, // Boş yerine anlamlı bir metin gönderiyoruz
+          affected_region: condType === "lumbar_hernia" ? "lower_back" : 
+                           condType === "knee_injury" ? "knee" : 
+                           condType === "shoulder_injury" ? "shoulder" : null,
         })),
       };
 

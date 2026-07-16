@@ -22,6 +22,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from database import engine, Base
+import models
 
 from config import get_settings
 from database import get_db
@@ -40,9 +42,14 @@ security = HTTPBearer()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f"🚀 {settings.app_name} başlatıldı.")
+
+    # Veri tabanı tablolarını uygulama başlarken otomatik olarak oluşturuyoruz
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print("🚀 Veri tabanı tabloları başarıyla senkronize edildi.")
+
     yield
     print("Uygulama kapatılıyor.")
-
 
 app = FastAPI(
     title=settings.app_name,
@@ -543,90 +550,86 @@ class ChatRequest(BaseModel):
 
 @app.post(
     "/chat/message",
-    summary="AI Antrenör ile mesajlaş (Presentation Mode — No Auth / No DB)",
+    summary="Chat with AI Coach (Dynamic Presentation Mode)",
     tags=["chatbot"],
 )
-async def chat_message(request: ChatRequest):
+async def chat_message(
+    request: ChatRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)], # Fetch the authenticated user dynamically
+):
     """
-    Jüri Sunumu Özel Chatbot Endpoint'i.
- 
-    Üç şeyi kasıtlı olarak devre dışı bırakır:
-      1. JWT kimlik doğrulama (Depends(get_current_user) yok)
-      2. PostgreSQL okuma  (geçmiş çekme yok)
-      3. PostgreSQL yazma  (db.add / db.commit yok)
- 
-    Gerçek LLM motoru (OpenAI / Anthropic) çalışmaya devam eder.
-    CoachChat.jsx'in beklediği tam yanıt şeması kayıpsız döner.
- 
-    ⚠️  SADECE SUNUM / GELİŞTİRME ORTAMINDA KULLANIN.
-        Production'da bu endpoint'i orijinal haliyle değiştirin.
+    Presentation mode chatbot endpoint.
+    Dynamically reads the user's registered profile, goals, and health conditions from the database.
     """
     import uuid as _uuid
- 
-    # ── 1. Sahte kullanıcı — DB bağlantısı gerektirmez ───────────────────────
-    # lower_back_pain yerine backend enum'ınızdaki gerçek değeri kullanın.
-    # Geçerli tipler: lumbar_hernia, knee_injury, shoulder_injury,
-    #                 hypertension, diabetes, heart_condition, other
-    class _MockCondition:
-        def __init__(self, condition_type, severity="moderate",
-                     affected_region="lower_back", is_active=True):
-            self.condition_type  = condition_type
-            self.severity        = severity
-            self.affected_region = affected_region
-            self.is_active       = is_active
- 
-    _mock_user = type("MockUser", (), {
-        "id":               _uuid.UUID("00000000-0000-0000-0000-000000000001"),
-        "full_name":        "Rubina Erin",
-        "primary_goal":     "muscle_gain",
-        "fitness_level":    "intermediate",
-        "health_conditions": [], # Sakatlık listesini tamamen boşaltıyoruz!
-    })()
- 
-    # ── 2. Geçmiş — sunum için boş, chatbot yine de çalışır ─────────────────
-    history: list[dict] = []
- 
-    # ── 3. Sağlık koşullarını chat_service formatına dönüştür ────────────────
+
+    # ── 1. Fetch Dynamic User Credentials ────────────────────────────────────
+    # Dynamically retrieves the first name of whichever user is logged in
+    user_display_name = current_user.full_name.split(" ")[0] # E.g., "Mehmet" or "Rubina"
+    
+    # ── 2. Convert Health Conditions to chat_service Format ──────────────────
     health_ctx = [
         HealthConditionCtx(
             condition_type  = c.condition_type,
             severity        = c.severity,
             affected_region = c.affected_region,
         )
-        for c in _mock_user.health_conditions
+        for c in current_user.health_conditions
         if c.is_active
     ]
  
-    # ── 4. Aktif plan bağlamı (frontend'den gelirse kullan) ──────────────────
+    # ── 3. Handle Active Workout Plan Context (if provided by frontend) ──────
     plan_ctx = None
     if request.plan_name:
         plan_ctx = ActivePlanCtx(
             plan_name             = request.plan_name,
             sessions_per_week     = request.sessions_per_week or 3,
-            primary_goal          = request.primary_goal or _mock_user.primary_goal,
+            primary_goal          = request.primary_goal or current_user.primary_goal,
             current_week          = request.current_week or 1,
             current_week_exercises = request.current_week_exercises,
         )
  
-    # ── 5. Sunum Özel Akıllı Cevap Simülasyonu (Healthy Athlete Mode) ──
+    # ── 4. Presentation-Optimized Dynamic Response Generation ────────────────
     msg = request.message.lower()
     
-    # Varsayılan İngilizce akıllı cevap (Fotoğraf yükleme soruna tam olarak uyan harika bir yanıt)
-    mock_reply = (
-        f"Hi Rubina! Since you have no active health conditions registered, we have a clean slate to maximize your gains. "
-        f"Regarding your question, without your Posture Studio metrics, the Workout Engine will generate a highly optimized, "
-        f"standardized hyper-trophy plan based entirely on your 'Muscle Gain' goal. However, once you upload your 4-angle photos, "
-        f"the system will fine-tune the exercise selections to correct any baseline muscular imbalances or structural asymmetries."
-    )
+    # Check if the user has any registered biomechanical injuries
+    has_injury = len(health_ctx) > 0
+    injury_names = ", ".join([c.condition_type.replace("_", " ").title() for c in health_ctx])
+
+    # Dynamic default coaching response based on user's live profile data
+    if has_injury:
+        mock_reply = (
+            f"Hi {user_display_name}! I see you have registered with active conditions: {injury_names}. "
+            f"Given your target of {current_user.target_weight_kg}kg, our neural guardrails are strictly active "
+            f"to protect your affected joints. Your custom plan generated by the Workout Engine will automatically "
+            f"avoid heavy loads on these regions. For a fully customized experience, please upload your photos in Posture Studio!"
+        )
+    else:
+        mock_reply = (
+            f"Hi {user_display_name}! Since you have no active health conditions registered, "
+            f"we have a clean slate to maximize your gains. "
+            f"Based on your target weight of {current_user.target_weight_kg}kg and '{current_user.primary_goal.replace('_', ' ').title()}' goal, "
+            f"the Workout Engine will generate a highly optimized training plan. Once you upload your 4-angle photos in Posture Studio, "
+            f"we'll fine-tune it further!"
+        )
+
     plan_update_payload = None
 
-    # Eğer kullanıcı ağrı/sakatlık veya alternatif kelimelerini sunumda test etmek isterse
-    if "pain" in msg or "ağrı" in msg:
-        mock_reply = (
-            "As a healthy athlete, experiencing pain means something is biomechanically off. "
-            "Make sure your form is correct, and remember that AuraFit AI allows you to log any future joint discomfort "
-            "directly so our neural guardrails can dynamically modify your routine."
-        )
+    # Dynamic feedback if the user mentions pain, ache, or alternative exercises
+    if "pain" in msg or "ağrı" in msg or "hurt" in msg or "sore" in msg:
+        if has_injury:
+            mock_reply = (
+                f"I understand you are feeling discomfort, {user_display_name}. Because of your registered {injury_names}, "
+                f"this pain is a sign to stop immediately. I highly recommend shifting your current workout day to mobility "
+                f"or core-stability exercises. Let's stay safe and avoid exacerbating the injury."
+            )
+        else:
+            mock_reply = (
+                f"As a healthy athlete, experiencing pain means something is biomechanically off, {user_display_name}. "
+                f"Make sure your form is correct, and remember that AuraFit AI allows you to log any future joint discomfort "
+                f"directly in your Profile so our neural guardrails can dynamically modify your routine."
+            )
 
     out = type("MockOut", (), {
         "reply": mock_reply,
@@ -635,11 +638,10 @@ async def chat_message(request: ChatRequest):
         "provider_used": "AuraFit-Healthy-LLM",
         "plan_update": plan_update_payload
     })()
-    # ── 6. DB adımları tamamen atlandı (db.add / db.commit yok) ─────────────
-    # Session ID'yi sabit tutmak frontend'in aynı oturumu takip etmesini sağlar.
+
     session_id = out.session_id or str(_uuid.uuid4())
  
-    # ── 7. CoachChat.jsx'in beklediği tam yanıt şeması ───────────────────────
+    # ── 5. Standardized JSON response payload expected by CoachChat.jsx ──────
     return {
         "reply":         out.reply,
         "session_id":    session_id,

@@ -40,42 +40,59 @@ def create_access_token(user_id: uuid.UUID) -> str:
 
 
 async def register_user(db: AsyncSession, data: RegisterRequest) -> RegisterResponse:
-    # 1. Email benzersizlik kontrolü
-    existing = await db.execute(select(User).where(User.email == data.user.email.lower()))
-    if existing.scalar_one_or_none():
-        raise EmailAlreadyExistsError(data.user.email)
+    import traceback # Hatanın tüm satır detayını terminale dökmek için ekledik
+    
+    try:
+        # 1. Email benzersizlik kontrolü (Artık try bloğunun içinde, hata verirse yakalanacak)
+        existing = await db.execute(select(User).where(User.email == data.user.email.lower()))
+        if existing.scalar_one_or_none():
+            raise EmailAlreadyExistsError(data.user.email)
 
-    # 2. Kullanıcı oluştur
-    user = User(
-        email=data.user.email.lower(),
-        password_hash=hash_password(data.user.password),
-        full_name=data.user.full_name,
-        gender=data.physical_data.gender,
-        birth_year=data.physical_data.birth_year,
-        height_cm=data.physical_data.height_cm,
-        current_weight_kg=data.physical_data.current_weight_kg,
-        target_weight_kg=data.physical_data.target_weight_kg,
-        fitness_level=data.physical_data.fitness_level,
-        primary_goal=data.physical_data.primary_goal,
-    )
-    db.add(user)
-    await db.flush()  # commit etmeden id'yi al
+        # 2. Kullanıcı oluştur
+        user = User(
+            email=data.user.email.lower(),
+            password_hash=hash_password(data.user.password),
+            full_name=data.user.full_name,
+            gender=data.physical_data.gender,
+            birth_year=data.physical_data.birth_year,
+            height_cm=data.physical_data.height_cm,
+            current_weight_kg=data.physical_data.current_weight_kg,
+            target_weight_kg=data.physical_data.target_weight_kg,
+            fitness_level=data.physical_data.fitness_level,
+            primary_goal=data.physical_data.primary_goal,
+        )
+        db.add(user)
+        await db.flush()  # Commit etmeden önce ID'yi üret
 
-    # 3. Sakatlık kayıtları
-    for cond in data.health_conditions:
-        db.add(UserHealthCondition(
-            user_id=user.id,
-            condition_type=cond.condition_type,
-            description=cond.description,
-            severity=cond.severity,
-            affected_region=cond.affected_region,
-        ))
+        # 3. Sakatlık kayıtları (Sadece geçerli olanları ekle)
+        valid_conditions = {
+            'lumbar_hernia', 'knee_injury', 'shoulder_injury',
+            'hypertension', 'diabetes', 'heart_condition', 'other'
+        }
 
-    # 4. Atomik commit
-    await db.commit()
-    await db.refresh(user)
+        for cond in data.health_conditions:
+            if cond.condition_type in valid_conditions:
+                db.add(UserHealthCondition(
+                    user_id=user.id,
+                    condition_type=cond.condition_type,
+                    description=cond.description or "No description provided.",
+                    severity=cond.severity,
+                    affected_region=cond.affected_region,
+                ))
 
-    has_conditions = len(data.health_conditions) > 0
+        # 4. Atomik commit
+        await db.commit()
+        await db.refresh(user)
+
+    except Exception as db_err:
+        await db.rollback()
+        # ─── Terminale Hata Çıktısını Zorla Yazdırıyoruz ───────────────────
+        print("\n❌ DATABASE REGISTRATION ERROR DETECTED:")
+        traceback.print_exc() # Hatanın hangi satırda ve neden gerçekleştiğini tam detaylı basar
+        print("──────────────────────────────────────────\n")
+        raise db_err
+
+    has_conditions = len(user.health_conditions) > 0
     rehab_warning = has_conditions and data.physical_data.primary_goal != "rehabilitation"
 
     return RegisterResponse(

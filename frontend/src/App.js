@@ -1,6 +1,7 @@
 import React from "react";
-import { BrowserRouter, Routes, Route, Navigate, Link } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
+import { LogOut } from "lucide-react"; // LogOut ikonunu ekledik
 
 import PostureStudio from "./pages/PostureStudio";
 import WorkoutEngine from "./pages/WorkoutEngine";
@@ -10,9 +11,17 @@ import Login from "./pages/Login";
 import Register from "./pages/Register";
 import Profile from "./pages/Profile";
 
-import { AuthProvider } from "./hooks/useAuth";
+import { AuthProvider, useAuth } from "./hooks/useAuth";
 
 function DashboardLayout() {
+  const navigate = useNavigate();
+  const { logout } = useAuth(); // useAuth içindeki logout fonksiyonunu çağırıyoruz
+
+  const handleLogout = () => {
+    logout(); // Token ve kullanıcı verisini localStorage'dan temizler
+    navigate("/login"); // Giriş sayfasına yönlendirir
+  };
+
   return (
     <div className="flex min-h-screen bg-base text-text-primary">
       {/* Sol Menü (Sidebar) */}
@@ -35,15 +44,28 @@ function DashboardLayout() {
             <Link to="/progress" className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-card transition-colors">
               📊 Progress Analytics
             </Link>
-            {/* Jürinin anında erişebilmesi için Sidebar'a Profile sekmesini ekledik */}
             <Link to="/profile" className="flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-card transition-colors">
               👤 User Profile
             </Link>
           </nav>
         </div>
-        <div className="p-3 border-t border-border flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-accent animate-pulse" />
-          <span className="text-[11px] text-text-muted">System Synchronized</span>
+
+        {/* Alt Kısım: Sign Out ve Senkronizasyon Durumu */}
+        <div className="space-y-2 pt-3 border-t border-border">
+          {/* Sign Out Butonu */}
+          <button
+            onClick={handleLogout}
+            className="flex items-center gap-3 w-full px-4 py-3 text-sm font-medium text-text-secondary hover:text-red-500 hover:bg-red-500/10 rounded-xl transition-all duration-200 group"
+          >
+            <LogOut size={18} className="text-text-secondary group-hover:text-red-500 transition-colors" />
+            <span>Sign Out</span>
+          </button>
+
+          {/* Sistem Durumu */}
+          <div className="flex items-center gap-2 px-4 py-1">
+            <div className="w-2 h-2 rounded-full bg-accent animate-pulse" />
+            <span className="text-[11px] text-text-muted">System Synchronized</span>
+          </div>
         </div>
       </aside>
 
@@ -54,7 +76,6 @@ function DashboardLayout() {
           <Route path="workout" element={<WorkoutEngine />} />
           <Route path="coach" element={<CoachChat />} />
           <Route path="progress" element={<ProgressAnalytics />} />
-          {/* DashboardLayout altındaki /profile rotasını tanımladık */}
           <Route path="profile" element={<Profile />} />
           <Route path="" element={<Navigate to="posture" replace />} />
         </Routes>
@@ -69,11 +90,8 @@ export default function App() {
       <AuthProvider>
         <Toaster position="top-right" />
         <Routes>
-          {/* Login ve Register sayfalarını ana rotalar olarak ekledik (Menüsüz bağımsız sayfalardır) */}
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
-          
-          {/* Diğer tüm panel sayfaları DashboardLayout içinde açılmaya devam eder */}
           <Route path="/*" element={<DashboardLayout />} />
         </Routes>
       </AuthProvider>

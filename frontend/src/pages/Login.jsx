@@ -56,7 +56,7 @@ const HERO_FEATURES = [
 
 export default function Login() {
   const navigate = useNavigate();
-  const { refreshUser } = useAuth();
+  const { setUser } = useAuth();
 
   // ── Form state ──────────────────────────────────────────────────────────────
   const [email, setEmail]         = useState("");
@@ -78,9 +78,10 @@ export default function Login() {
       const { data } = await api.post("/auth/login", { email, password });
       localStorage.setItem("fitcore_token", data.access_token);
 
-      // Hydrate the global AuthContext so all downstream pages receive the
-      // authenticated user object immediately after redirection.
-      await refreshUser();
+      // AuthContext state'ini doğrudan backend'den gelen kullanıcı verisiyle besliyoruz
+      if (setUser) {
+        setUser(data.user);
+      }
 
       toast.success(`Welcome back, ${data.user?.full_name?.split(" ")[0] || "Athlete"}!`);
       navigate("/posture");
