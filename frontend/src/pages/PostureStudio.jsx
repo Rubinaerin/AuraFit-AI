@@ -10,7 +10,6 @@ import Topbar from "../components/layout/Topbar";
 import ScoreRing from "../components/ui/ScoreRing";
 import Spinner from "../components/ui/Spinner";
 import { postureService } from "../services/postureService";
-import { scoreColor } from "../utils/format";
 
 const ANGLES = [
   { key: "front", label: "Front View", hint: "Face the camera, arms at sides" },
@@ -136,18 +135,31 @@ export default function PostureStudio() {
     setResults((r) => { const n = { ...r }; delete n[angle]; return n; });
   };
 
+  const resetAll = () => {
+    setPhotos({}); 
+    setResults({}); 
+    setLoading({}); 
+    setOverallScore(null);
+  };
+
   const analyzeAll = async () => {
     const toAnalyze = Object.entries(photos).filter(([, f]) => f);
-    if (!toAnalyze.length) { toast.error("Upload at least one photo first."); return; }
+    if (!toAnalyze.length) { 
+      toast.error("Upload at least one photo first."); 
+      return; 
+    }
+
+    const updatedResults = { ...results };
 
     for (const [angle, file] of toAnalyze) {
       setLoading((l) => ({ ...l, [angle]: true }));
       try {
         const data = await postureService.analyzeSingle(file, angle);
+        updatedResults[angle] = data;
         setResults((r) => ({ ...r, [angle]: data }));
-        toast.success(`${angle} view analyzed!`);
+        toast.success(`${angle.charAt(0).toUpperCase() + angle.slice(1)} view analyzed successfully!`);
       } catch (err) {
-        toast.error(`${angle}: ${err.message}`);
+        toast.error(`${angle}: ${err.message || "Analysis failed."}`);
       } finally {
         setLoading((l) => ({ ...l, [angle]: false }));
       }
@@ -155,21 +167,19 @@ export default function PostureStudio() {
 
     // Weighted combined score
     const weights = { front: 0.4, back: 0.25, left: 0.2, right: 0.15 };
-    setResults((r) => {
-      let total = 0, wSum = 0;
-      Object.entries(r).forEach(([a, res]) => {
-        if (res?.posture_score != null && weights[a]) {
-          total += res.posture_score * weights[a];
-          wSum  += weights[a];
-        }
-      });
-      if (wSum > 0) setOverallScore(Math.round(total / wSum));
-      return r;
-    });
-  };
+    let total = 0;
+    let wSum = 0;
 
-  const resetAll = () => {
-    setPhotos({}); setResults({}); setLoading({}); setOverallScore(null);
+    Object.entries(updatedResults).forEach(([a, res]) => {
+      if (res?.posture_score != null && weights[a]) {
+        total += res.posture_score * weights[a];
+        wSum  += weights[a];
+      }
+    });
+
+    if (wSum > 0) {
+      setOverallScore(Math.round(total / wSum));
+    }
   };
 
   const analyzedCount = Object.values(results).filter(Boolean).length;
@@ -283,5 +293,5 @@ export default function PostureStudio() {
         )}
       </main>
     </>
-  );
+  ); 
 }

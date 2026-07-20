@@ -15,10 +15,10 @@ class Settings(BaseSettings):
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-
+class Config:
+    env_file = ".env"
+    env_file_encoding = "utf-8"
+    extra = "ignore"  
 
 @lru_cache
 def get_settings() -> Settings:

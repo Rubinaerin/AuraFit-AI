@@ -34,7 +34,10 @@ try:
     _ANTHROPIC_AVAILABLE = True
 except ImportError:
     _ANTHROPIC_AVAILABLE = False
-
+from __future__ import annotations
+import os
+from dotenv import load_dotenv
+load_dotenv(override=True)
 from config import get_settings
 
 settings = get_settings()
