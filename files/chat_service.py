@@ -1,13 +1,13 @@
 """
-chat_service.py — Hafızalı AI Antrenör Chatbot Servisi
+chat_service.py — AI Fitness Coach Chatbot Service with Memory
 
-Hafıza mekanizması:
-  Konuşma geçmişi PostgreSQL chat_messages tablosunda tutulur.
-  Her istek geldiğinde main.py, DB'den son MAX_HISTORY mesajı çekip
-  ChatInput.history listesine doldurur ve bu servisi çağırır.
-  LLM her turda tam bağlamı görür — harici bir vektör DB'ye gerek yok.
+Memory Mechanism:
+  Conversation history is stored in the PostgreSQL chat_messages table.
+  On each request, main.py retrieves the latest MAX_HISTORY messages from DB,
+  populates the ChatInput.history list, and calls this service.
+  The LLM sees full context on every turn — no external vector DB required.
 
-Kullanım (main.py içinden):
+Usage (from main.py):
     from chat_service import chat_with_coach, ChatInput, ChatOutput
 """
 
@@ -39,7 +39,7 @@ settings = get_settings()
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "coach_persona.txt"
 _CACHED_PROMPT: Optional[str] = None
 
-MAX_HISTORY = 20   # LLM'e gönderilecek maksimum geçmiş mesaj sayısı
+MAX_HISTORY = 20   # Maximum historical messages passed to LLM
 
 
 def _load_coach_prompt() -> str:
@@ -48,16 +48,16 @@ def _load_coach_prompt() -> str:
         _CACHED_PROMPT = (
             _PROMPT_PATH.read_text(encoding="utf-8")
             if _PROMPT_PATH.exists()
-            else "Sen uzman bir kişisel antrenörsün. Güvenli ve etkili egzersiz tavsiyeleri ver."
+            else "You are an expert personal trainer. Provide safe and effective exercise recommendations."
         )
     return _CACHED_PROMPT
 
 
-# ─── Veri Sınıfları ───────────────────────────────────────────────────────────
+# ─── Data Classes ─────────────────────────────────────────────────────────────
 
 @dataclass
 class HealthConditionCtx:
-    condition_type: str       # lumbar_hernia | knee_injury | ...
+    condition_type: str       # lumbar_hernia | knee_injury | shoulder_injury ...
     severity: str             # mild | moderate | severe
     affected_region: Optional[str] = None
 
@@ -74,11 +74,11 @@ class ActivePlanCtx:
 @dataclass
 class ChatInput:
     """
-    POST /chat/message'dan gelen ve servise iletilen tüm bağlam.
+    Context received from POST /chat/message and passed to service.
 
-    session_id: None → yeni oturum açılır; dolu → mevcut oturum devam eder.
+    session_id: None → opens new session; string → continues existing session.
     history: [{"role": "user"|"assistant", "content": "..."}]
-             main.py bu listeyi DB'den doldurup iletir.
+             main.py populates this list from DB.
     """
     user_id: str
     user_name: str
@@ -86,13 +86,14 @@ class ChatInput:
     session_id: Optional[str] = None
     health_conditions: list[HealthConditionCtx] = field(default_factory=list)
     active_plan: Optional[ActivePlanCtx] = None
+    has_posture_data: bool = False
     history: list[dict] = field(default_factory=list)
     preferred_provider: str = "auto"
 
 
 @dataclass
 class PlanUpdateAction:
-    """LLM'in PLAN_UPDATE bloğundan parse edilen egzersiz değişikliği."""
+    """Exercise substitution action parsed from LLM's PLAN_UPDATE block."""
     action: str
     old_exercise: Optional[str] = None
     new_exercise: Optional[str] = None
@@ -112,7 +113,7 @@ class ChatOutput:
     _raw_user_message: str = field(default="", repr=False)
 
     def user_db_row(self) -> dict:
-        """chat_messages tablosuna yazılacak kullanıcı mesajı satırı."""
+        """Row dict to insert into chat_messages table for user message."""
         return {
             "role": "user",
             "content": self._raw_user_message,
@@ -121,7 +122,7 @@ class ChatOutput:
         }
 
     def assistant_db_row(self) -> dict:
-        """chat_messages tablosuna yazılacak asistan yanıtı satırı."""
+        """Row dict to insert into chat_messages table for assistant response."""
         return {
             "role": "assistant",
             "content": self.reply,
@@ -138,36 +139,45 @@ class ChatOutput:
         }
 
 
-# ─── Sistem Promptu Builder ───────────────────────────────────────────────────
+# ─── System Prompt Builder ───────────────────────────────────────────────────
 
 def _build_system_prompt(data: ChatInput) -> str:
     """
-    Her turda kullanıcıya özgü sistem promptu üretir.
-    Temel persona + kullanıcı adı + aktif sağlık koşulları + aktif plan.
+    Generates user-specific system prompt per turn.
+    Base persona + user name + active health conditions + posture status + active plan.
     """
     lines = [_load_coach_prompt(), "",
              "════════════════════════════════════════",
-             "MEVCUT KULLANICI PROFİLİ",
+             "CURRENT USER PROFILE",
              "════════════════════════════════════════",
-             f"Ad: {data.user_name}"]
+             f"Name: {data.user_name}"]
 
     if data.health_conditions:
-        lines.append("\nSağlık Koşulları ⚠️ — tetikleyen egzersizleri ASLA önerme:")
+        lines.append("\nHealth Conditions ⚠️ — NEVER recommend exercises that trigger these:")
         for c in data.health_conditions:
             region = f" ({c.affected_region})" if c.affected_region else ""
             lines.append(f"  • {c.condition_type}{region} — {c.severity}")
     else:
-        lines.append("Sağlık Koşulları: Yok")
+        lines.append("Health Conditions: None")
+
+    # Posture Analysis Status Context
+    if data.has_posture_data:
+        lines.append("Posture Analysis Status: Completed (User HAS uploaded posture photos and completed analysis).")
+        lines.append("IMPORTANT: DO NOT ask or suggest the user to upload posture photos since they have already done so!")
+    else:
+        lines.append("Posture Analysis Status: Not uploaded yet.")
 
     if data.active_plan:
         p = data.active_plan
         lines += [
             "",
-            "Aktif Plan:",
-            f"  • {p.plan_name} | Haftada {p.sessions_per_week} gün | Hedef: {p.primary_goal} | Hafta {p.current_week}",
+            "Active Plan:",
+            f"  • {p.plan_name} | {p.sessions_per_week} days/week | Goal: {p.primary_goal} | Week {p.current_week}",
         ]
         if p.current_week_exercises:
-            lines.append("  • Bu haftanın egzersizleri: " + ", ".join(p.current_week_exercises))
+            lines.append("  • Current week exercises: " + ", ".join(p.current_week_exercises))
+
+    lines.append("\nSTRICT RULE: Always respond in Standard English.")
 
     return "\n".join(lines)
 
@@ -179,8 +189,8 @@ _UPDATE_RE = re.compile(r"PLAN_UPDATE:\s*(\{.+?\})", re.DOTALL)
 
 def _parse_plan_update(raw: str) -> tuple[str, Optional[PlanUpdateAction]]:
     """
-    LLM yanıtının sonundaki PLAN_UPDATE bloğunu bulur ve ayırır.
-    Dönüş: (temizlenmiş_yanıt, PlanUpdateAction | None)
+    Finds and extracts PLAN_UPDATE block at the end of LLM response.
+    Returns: (cleaned_reply, PlanUpdateAction | None)
     """
     m = _UPDATE_RE.search(raw)
     if not m:
@@ -199,10 +209,10 @@ def _parse_plan_update(raw: str) -> tuple[str, Optional[PlanUpdateAction]]:
             rest_seconds=d.get("rest_seconds", 60),
         )
     except (json.JSONDecodeError, KeyError):
-        return clean, None   # JSON bozuksa sessizce atla
+        return clean, None   # Ignore silently if JSON is invalid
 
 
-# ─── LLM Çağrıları ───────────────────────────────────────────────────────────
+# ─── LLM Calls ───────────────────────────────────────────────────────────────
 
 async def _call_openai(system: str, history: list[dict], message: str) -> tuple[str, int]:
     client = AsyncOpenAI(api_key=settings.openai_api_key)
@@ -226,14 +236,14 @@ async def _call_anthropic(system: str, history: list[dict], message: str) -> tup
     return resp.content[0].text, resp.usage.input_tokens + resp.usage.output_tokens
 
 
-# ─── Ana Fonksiyon ────────────────────────────────────────────────────────────
+# ─── Main Function ────────────────────────────────────────────────────────────
 
 async def chat_with_coach(data: ChatInput) -> ChatOutput:
     """
-    Kullanıcı mesajını geçmiş bağlamıyla LLM'e gönderir ve yanıtı döner.
+    Sends user message along with history context to LLM and returns the response.
 
-    main.py'de tipik kullanım:
-        # 1. DB'den geçmişi çek
+    Typical usage in main.py:
+        # 1. Fetch history from DB
         rows = await db.execute(
             select(ChatMessage)
             .where(ChatMessage.session_id == session_id)
@@ -242,15 +252,15 @@ async def chat_with_coach(data: ChatInput) -> ChatOutput:
         )
         history = [{"role": r.role, "content": r.content} for r in rows.scalars()]
 
-        # 2. Servisi çağır
+        # 2. Call chat service
         out = await chat_with_coach(ChatInput(..., history=history))
 
-        # 3. İki mesajı DB'ye kaydet
+        # 3. Save both messages to DB
         db.add(ChatMessage(session_id=out.session_id, **out.user_db_row()))
         db.add(ChatMessage(session_id=out.session_id, **out.assistant_db_row()))
         await db.commit()
 
-        # 4. Egzersiz değişikliği varsa uygula
+        # 4. Apply exercise modification if present
         if out.plan_update:
             await swap_exercise_in_plan(db, out.plan_update)
     """
@@ -261,7 +271,7 @@ async def chat_with_coach(data: ChatInput) -> ChatOutput:
         elif _ANTHROPIC_OK and getattr(settings, "anthropic_api_key", None):
             provider = "anthropic"
         else:
-            raise RuntimeError("LLM API anahtarı bulunamadı.")
+            raise RuntimeError("No LLM API key found.")
 
     system = _build_system_prompt(data)
     session_id = data.session_id or str(uuid.uuid4())

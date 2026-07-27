@@ -51,11 +51,11 @@ export function AuthProvider({ children }) {
     updateActiveUser(null);
   };
 
-  return (
-    <AuthContext.Provider value={{ user, setUser: updateActiveUser, loading, logout }}>
-      {children}
-    </AuthContext.Provider>
-  );
+return (
+  <AuthContext.Provider value={{ user, setUser: updateActiveUser, refreshUser: updateActiveUser, loading, logout }}>
+    {children}
+  </AuthContext.Provider>
+);
 }
 
 export function useAuth() {

@@ -519,13 +519,17 @@ async def preview_plan_prompt(
         "system_prompt_chars": len(prompts["system_prompt"]),
         "user_prompt": prompts["user_prompt"],
     }
+# ── ChatRequest Pydantic Model ───────────────────────────────────────────────
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
     session_id: Optional[str] = Field(
         default=None,
-        description="Mevcut oturumu sürdürmek için doldurun. Boş bırakırsanız yeni oturum açılır."
+        description="Provided to maintain an existing chat session. If left empty, a new session is created."
     )
-    # Aktif antrenman planı (opsiyonel — doldurulursa chatbot plana göre yanıt verir)
+    history: list[dict] = Field(default_factory=list, description="Historical chat messages context")
+    
+    # Active workout plan (optional context for personalized guidance)
     plan_name: Optional[str] = None
     sessions_per_week: Optional[int] = None
     primary_goal: Optional[str] = None
@@ -536,9 +540,10 @@ class ChatRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "message": "Bel fıtığım ağrıdı, deadlift'e alternatif ne önerirsin?",
+                "message": "I felt discomfort in my lower back, what alternative exercise do you suggest for deadlifts?",
                 "session_id": None,
-                "plan_name": "8 Haftalık Kilo Verme Programı",
+                "history": [],
+                "plan_name": "8-Week Weight Loss Program",
                 "sessions_per_week": 3,
                 "primary_goal": "weight_loss",
                 "current_week": 2,
@@ -548,103 +553,83 @@ class ChatRequest(BaseModel):
         }
     )
 
+
+# ════════════════════════════════════════════════════════
+#  POST /chat/message — AI Coach Chatbot Endpoint
+# ════════════════════════════════════════════════════════
+
 @app.post(
     "/chat/message",
-    summary="Chat with AI Coach (Dynamic Presentation Mode)",
+    summary="Chat with AI Coach (Live LLM Mode with Dynamic Context)",
     tags=["chatbot"],
 )
 async def chat_message(
     request: ChatRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)], # Fetch the authenticated user dynamically
+    current_user: Annotated[User, Depends(get_current_user)],
 ):
     """
-    Presentation mode chatbot endpoint.
-    Dynamically reads the user's registered profile, goals, and health conditions from the database.
+    Live AI Chatbot endpoint.
+    Retrieves user profile and active health conditions dynamically from DB,
+    passes context and chat history to chat_service, and returns LLM feedback.
     """
-    import uuid as _uuid
+    from chat_service import chat_with_coach, ChatInput, HealthConditionCtx, ActivePlanCtx
 
     # ── 1. Fetch Dynamic User Credentials ────────────────────────────────────
-    # Dynamically retrieves the first name of whichever user is logged in
-    user_display_name = current_user.full_name.split(" ")[0] # E.g., "Mehmet" or "Rubina"
+    user_display_name = current_user.full_name.split(" ")[0] if current_user.full_name else "Athlete"
     
-    # ── 2. Convert Health Conditions to chat_service Format ──────────────────
+    # ── 2. Convert Active Health Conditions ──────────────────────────────────
     health_ctx = [
         HealthConditionCtx(
             condition_type  = c.condition_type,
             severity        = c.severity,
             affected_region = c.affected_region,
         )
-        for c in current_user.health_conditions
+        for c in (current_user.health_conditions or [])
         if c.is_active
     ]
- 
-    # ── 3. Handle Active Workout Plan Context (if provided by frontend) ──────
+
+    # ── 3. Posture Photo Check ────────────────────────────────────────────────
+    # Posture studio photos check safely defaulted (prevents missing model imports)
+    user_has_posture_photos = False
+
+    # ── 4. Handle Active Workout Plan Context ────────────────────────────────
     plan_ctx = None
     if request.plan_name:
         plan_ctx = ActivePlanCtx(
             plan_name             = request.plan_name,
             sessions_per_week     = request.sessions_per_week or 3,
-            primary_goal          = request.primary_goal or current_user.primary_goal,
+            primary_goal          = request.primary_goal or current_user.primary_goal or "general_fitness",
             current_week          = request.current_week or 1,
-            current_week_exercises = request.current_week_exercises,
-        )
- 
-    # ── 4. Presentation-Optimized Dynamic Response Generation ────────────────
-    msg = request.message.lower()
-    
-    # Check if the user has any registered biomechanical injuries
-    has_injury = len(health_ctx) > 0
-    injury_names = ", ".join([c.condition_type.replace("_", " ").title() for c in health_ctx])
-
-    # Dynamic default coaching response based on user's live profile data
-    if has_injury:
-        mock_reply = (
-            f"Hi {user_display_name}! I see you have registered with active conditions: {injury_names}. "
-            f"Given your target of {current_user.target_weight_kg}kg, our neural guardrails are strictly active "
-            f"to protect your affected joints. Your custom plan generated by the Workout Engine will automatically "
-            f"avoid heavy loads on these regions. For a fully customized experience, please upload your photos in Posture Studio!"
-        )
-    else:
-        mock_reply = (
-            f"Hi {user_display_name}! Since you have no active health conditions registered, "
-            f"we have a clean slate to maximize your gains. "
-            f"Based on your target weight of {current_user.target_weight_kg}kg and '{current_user.primary_goal.replace('_', ' ').title()}' goal, "
-            f"the Workout Engine will generate a highly optimized training plan. Once you upload your 4-angle photos in Posture Studio, "
-            f"we'll fine-tune it further!"
+            current_week_exercises = request.current_week_exercises or [],
         )
 
-    plan_update_payload = None
+    # ── 5. Build ChatInput Payload for LLM Service ───────────────────────────
+    chat_input = ChatInput(
+        user_id          = str(current_user.id),
+        user_name        = user_display_name,
+        message          = request.message,
+        session_id       = request.session_id,
+        health_conditions= health_ctx,
+        active_plan      = plan_ctx,
+        has_posture_data = user_has_posture_photos,
+        history          = getattr(request, "history", []) or [],
+        preferred_provider = getattr(request, "preferred_provider", "auto"),
+    )
 
-    # Dynamic feedback if the user mentions pain, ache, or alternative exercises
-    if "pain" in msg or "ağrı" in msg or "hurt" in msg or "sore" in msg:
-        if has_injury:
-            mock_reply = (
-                f"I understand you are feeling discomfort, {user_display_name}. Because of your registered {injury_names}, "
-                f"this pain is a sign to stop immediately. I highly recommend shifting your current workout day to mobility "
-                f"or core-stability exercises. Let's stay safe and avoid exacerbating the injury."
-            )
-        else:
-            mock_reply = (
-                f"As a healthy athlete, experiencing pain means something is biomechanically off, {user_display_name}. "
-                f"Make sure your form is correct, and remember that AuraFit AI allows you to log any future joint discomfort "
-                f"directly in your Profile so our neural guardrails can dynamically modify your routine."
-            )
+    # ── 6. Execute LLM Chat Request ─────────────────────────────────────────
+    try:
+        out = await chat_with_coach(chat_input)
+    except Exception as err:
+        raise HTTPException(
+            status_code=500,
+            detail=f"AI Coaching Service error: {str(err)}"
+        )
 
-    out = type("MockOut", (), {
-        "reply": mock_reply,
-        "session_id": request.session_id or str(_uuid.uuid4()),
-        "tokens_used": 130,
-        "provider_used": "AuraFit-Healthy-LLM",
-        "plan_update": plan_update_payload
-    })()
-
-    session_id = out.session_id or str(_uuid.uuid4())
- 
-    # ── 5. Standardized JSON response payload expected by CoachChat.jsx ──────
+    # ── 7. Return Standardized JSON Response ─────────────────────────────────
     return {
         "reply":         out.reply,
-        "session_id":    session_id,
+        "session_id":    out.session_id,
         "tokens_used":   out.tokens_used or 0,
         "provider_used": out.provider_used or "openai",
         "plan_update": (
@@ -660,51 +645,51 @@ async def chat_message(
             if out.plan_update else None
         ),
     }
- 
+
 # ════════════════════════════════════════════════════════
-#  POST /analysis/posture/compare — Aylık Gelişim Raporu
+#  POST /analysis/posture/compare — Monthly Progress Report
 # ════════════════════════════════════════════════════════
 
 @app.post(
     "/analysis/posture/compare",
-    summary="Aylık postür gelişim karşılaştırması",
-    tags=["analiz"],
+    summary="Monthly posture progress comparison",
+    tags=["analysis"],
     responses={
-        200: {"description": "Gelişim raporu üretildi."},
-        404: {"description": "Baseline analiz kaydı bulunamadı."},
-        422: {"description": "Yeni fotoğrafta pose tespit edilemedi."},
+        200: {"description": "Progress report generated successfully."},
+        404: {"description": "Baseline analysis record not found."},
+        422: {"description": "Pose could not be detected in the new photo."},
     },
 )
 async def compare_posture_endpoint(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    new_photo: UploadFile = File(..., description="Bu aydaki fotoğraf (JPG/PNG)"),
+    new_photo: UploadFile = File(..., description="Photo for current month (JPG/PNG/WebP)"),
     angle: str = Form("front", description="front | back | left | right"),
-    new_month_number: int = Form(..., description="Bu fotoğraf kaçıncı aya ait? (2, 3, 4...)"),
-    baseline_month: int = Form(1, description="Karşılaştırılacak baz ay (genellikle 1)"),
+    new_month_number: int = Form(..., description="Target month number for this photo (2, 3, 4...)"),
+    baseline_month: int = Form(1, description="Baseline month to compare against (default: 1)"),
     preferred_provider: str = Form("auto"),
 ):
     """
-    Gelişim karşılaştırma akışı:
-    1. DB'den baseline (baz ay) analiz kaydını çeker.
-    2. Yeni fotoğrafı cv_service ile analiz eder.
-    3. Metrikleri karşılaştırıp delta hesaplar.
-    4. LLM ile Türkçe gelişim raporu üretir.
-    5. Yeni analizi DB'ye kaydeder.
+    Progress comparison flow:
+    1. Fetches baseline analysis record from DB.
+    2. Analyzes new photo via cv_service.
+    3. Calculates metrics comparison and deltas.
+    4. Generates an AI progress report via LLM.
+    5. Saves new photo and analysis result into DB.
     """
     from sqlalchemy import select as sa_select
 
-    # ── Dosya validasyonu ─────────────────────────────────────────────────
+    # ── File validation ───────────────────────────────────────────────────
     if angle not in ("front", "back", "left", "right"):
-        raise HTTPException(status_code=422, detail="Geçersiz açı. front/back/left/right kullanın.")
+        raise HTTPException(status_code=422, detail="Invalid angle. Allowed values: front, back, left, right.")
     if new_photo.content_type not in ("image/jpeg", "image/png", "image/webp"):
-        raise HTTPException(status_code=415, detail="Sadece JPG, PNG veya WebP kabul edilir.")
+        raise HTTPException(status_code=415, detail="Unsupported media type. Only JPG, PNG, or WebP files are allowed.")
 
     photo_bytes = await new_photo.read()
     if len(photo_bytes) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Dosya 10 MB'dan büyük olamaz.")
+        raise HTTPException(status_code=413, detail="File size exceeds maximum allowed limit of 10 MB.")
 
-    # ── Baseline analizi DB'den çek ───────────────────────────────────────
+    # ── Retrieve Baseline Analysis from DB ────────────────────────────────
     baseline_row = await db.execute(
         sa_select(PhotoAnalysis)
         .join(ProgressPhoto, PhotoAnalysis.photo_id == ProgressPhoto.id)
@@ -722,12 +707,12 @@ async def compare_posture_endpoint(
         raise HTTPException(
             status_code=404,
             detail=(
-                f"Ay {baseline_month} için '{angle}' açısında baseline analiz kaydı bulunamadı. "
-                "Önce /analysis/posture/single endpoint'i ile başlangıç fotoğrafınızı yükleyin."
+                f"No baseline analysis found for month {baseline_month} and angle '{angle}'. "
+                "Please upload a baseline photo first using the /analysis/posture/single endpoint."
             ),
         )
 
-    # BaselineMetrics nesnesi oluştur
+    # Construct BaselineMetrics object
     bm = baseline_analysis.body_measurements or {}
     baseline = BaselineMetrics(
         posture_score=float(baseline_analysis.posture_score or 0),
@@ -741,7 +726,7 @@ async def compare_posture_endpoint(
         shoulder_width_ratio=bm.get("shoulder_width_ratio"),
     )
 
-    # ── Karşılaştırmayı çalıştır ──────────────────────────────────────────
+    # ── Execute Comparison ────────────────────────────────────────────────
     result = await compare_posture(CompareInput(
         user_id=str(current_user.id),
         user_name=current_user.full_name,
@@ -755,44 +740,70 @@ async def compare_posture_endpoint(
     if not result.success:
         raise HTTPException(status_code=422, detail=result.error_message)
 
-    # ── Yeni fotoğraf kaydı oluştur ───────────────────────────────────────
+    # ── Create New Progress Photo Record ─────────────────────────────────
     new_photo_row = ProgressPhoto(
         user_id=current_user.id,
         photo_angle=angle,
         storage_path=f"users/{current_user.id}/photos/month_{new_month_number}_{angle}.jpg",
         storage_bucket="fitness-app-photos",
         month_number=new_month_number,
-        weight_at_time_kg=None,     # Kullanıcı ileride ekleyebilir
+        weight_at_time_kg=None,
     )
     db.add(new_photo_row)
-    await db.flush()  # ID'yi al
+    await db.flush()
 
-    # ── Yeni analiz kaydını DB'ye yaz ─────────────────────────────────────
+    # ── Insert New Photo Analysis Record to DB ───────────────────────────
     payload = result.new_analysis_db_payload.copy()
     db.add(PhotoAnalysis(
         photo_id=new_photo_row.id,
         posture_landmarks=payload.get("posture_landmarks"),
         body_measurements=payload.get("body_measurements"),
         posture_score=result.new_posture_score,
-        comparison_delta=payload.get("comparison_delta"),   # Delta JSONB burada!
+        comparison_delta=payload.get("comparison_delta"),
     ))
     await db.commit()
 
-    # ── Yanıt ────────────────────────────────────────────────────────────
+    # ── Endpoint Response ─────────────────────────────────────────────────
     d = result.delta
     return {
         "summary": result.summary_text(),
         "scores": {
-            "baseline_month":  baseline_month,
-            "new_month":       new_month_number,
-            "baseline_score":  d.posture_score.baseline_value,
-            "new_score":       d.posture_score.new_value,
-            "score_change":    d.posture_score.delta,
+            "baseline_month":   baseline_month,
+            "new_month":        new_month_number,
+            "baseline_score":   d.posture_score.baseline_value,
+            "new_score":        d.posture_score.new_value,
+            "score_change":     d.posture_score.delta,
             "score_change_pct": d.posture_score.change_pct,
         },
         "metrics": result.delta.to_dict(),
         "improved_count":  result.delta.improved_count(),
         "worsened_count":  result.delta.worsened_count(),
-        "ai_report":       result.report,   # LLM'in ürettiği JSON raporu
-        "new_warnings":    result.delta.posture_score.new_value and [],   # Boş liste default
+        "ai_report":       result.report,
+        "new_warnings":    [],
     }
+# ─── GET /workout/active ───────────────────────────────────────────────────
+
+@app.get(
+    "/workout/active",
+    summary="Fetch the user's current active workout plan",
+    tags=["antrenman"],
+    responses={
+        200: {"description": "Active plan retrieved successfully."},
+        404: {"description": "No active plan found for this user."},
+    },
+)
+async def get_active_workout_plan(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Retrieves the most recent workout plan for the authenticated user,
+    including week structures and day exercises.
+    """
+    from sqlalchemy import select as sa_select
+    # WorkoutPlan, WorkoutDay vs. modelleriniz hangileriyse import edebilirsiniz:
+    # my_plan = await db.execute(...)
+
+    # Not: Veri tabanı şemanıza göre en son oluşturulan plan sorgulanır.
+    # Eğer henüz DB'ye kaydetmiyorsanız veya mock response gerekiyorsa 404 döndürülebilir:
+    raise HTTPException(status_code=404, detail="No active workout plan found.")

@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useOutletContext } from "react-router-dom";
 import { useDropzone } from "react-dropzone";
 import {
@@ -120,10 +120,24 @@ function AngleSlot({ angle, file, onDrop, onClear, result, loading }) {
 
 export default function PostureStudio() {
   const { onMenuClick } = useOutletContext() || {};
-  const [photos, setPhotos] = useState({});        // { front: File, ... }
-  const [results, setResults] = useState({});       // { front: AnalysisResult, ... }
+  const [photos, setPhotos] = useState({});
+  const [results, setResults] = useState({});
   const [loading, setLoading] = useState({});
   const [overallScore, setOverallScore] = useState(null);
+
+  // Load saved analysis results from localStorage on component mount
+  useEffect(() => {
+    const saved = localStorage.getItem("latest_posture_results");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed.results) setResults(parsed.results);
+        if (parsed.overallScore != null) setOverallScore(parsed.overallScore);
+      } catch (e) {
+        console.error("Failed to restore posture data", e);
+      }
+    }
+  }, []);
 
   const handleDrop = (angle, file) => {
     setPhotos((p) => ({ ...p, [angle]: file }));
@@ -140,6 +154,7 @@ export default function PostureStudio() {
     setResults({}); 
     setLoading({}); 
     setOverallScore(null);
+    localStorage.removeItem("latest_posture_results");
   };
 
   const analyzeAll = async () => {
@@ -165,7 +180,7 @@ export default function PostureStudio() {
       }
     }
 
-    // Weighted combined score
+    // Weighted combined score calculation
     const weights = { front: 0.4, back: 0.25, left: 0.2, right: 0.15 };
     let total = 0;
     let wSum = 0;
@@ -177,9 +192,16 @@ export default function PostureStudio() {
       }
     });
 
-    if (wSum > 0) {
-      setOverallScore(Math.round(total / wSum));
+    const calculatedOverall = wSum > 0 ? Math.round(total / wSum) : null;
+    if (calculatedOverall != null) {
+      setOverallScore(calculatedOverall);
     }
+
+    // Save state to local storage so navigation doesn't clear results
+    localStorage.setItem(
+      "latest_posture_results",
+      JSON.stringify({ results: updatedResults, overallScore: calculatedOverall })
+    );
   };
 
   const analyzedCount = Object.values(results).filter(Boolean).length;
@@ -238,7 +260,7 @@ export default function PostureStudio() {
               </h3>
               <p className="text-sm text-text-secondary">
                 Based on {analyzedCount} angle{analyzedCount > 1 ? "s" : ""} analyzed. A score above 80 indicates
-                well-aligned posture. Upload photos in future months to track improvement in Progress Analytics.
+                well-aligned posture.
               </p>
               {analyzedCount < 4 && (
                 <p className="text-xs text-text-muted flex items-center gap-1">

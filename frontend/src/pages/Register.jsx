@@ -146,7 +146,7 @@ function FieldWrapper({ label, required, children }) {
 
 export default function Register() {
   const navigate    = useNavigate();
-  const { refreshUser } = useAuth();
+  const { setUser } = useAuth();
 
   const [step, setStep]     = useState(1);
   const [loading, setLoading] = useState(false);
@@ -242,7 +242,7 @@ export default function Register() {
 
       const { data } = await api.post("/auth/register", payload);
       localStorage.setItem("fitcore_token", data.access_token);
-      await refreshUser();
+      setUser(data.user);
 
       toast.success("Account created successfully! Welcome to AuraFit AI.");
       navigate("/posture");
