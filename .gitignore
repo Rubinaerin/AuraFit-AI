@@ -2,3 +2,14 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Frontend & Node.js
+node_modules/
+frontend/node_modules/
+.cache/
+frontend/node_modules/.cache/
+
+# Build & Log
+build/
+dist/
+*.log
