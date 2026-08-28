@@ -9,7 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator, ConfigDict
 
 
-# ─── Enum'lar ────────────────────────────────────────────────────────────────
+
 
 class GenderEnum(str, Enum):
     male = "male"
@@ -47,7 +47,7 @@ class SeverityEnum(str, Enum):
     severe = "severe"
 
 
-# ─── İstek Şemaları ──────────────────────────────────────────────────────────
+
 
 class HealthConditionSchema(BaseModel):
     condition_type: ConditionTypeEnum
@@ -138,7 +138,7 @@ class RegisterRequest(BaseModel):
     )
 
 
-# ─── Yanıt Şemaları ──────────────────────────────────────────────────────────
+
 
 class HealthConditionResponse(BaseModel):
     id: UUID
@@ -181,3 +181,22 @@ from typing import Optional, List, Dict, Any
 class UpdateProfileRequest(BaseModel):
     physical_data: Optional[Dict[str, Any]] = None
     health_conditions: Optional[List[Dict[str, Any]]] = None
+
+
+# ─── Posture Comparison Schemas ──────────────────────────────────────────────
+
+class CompareInput(BaseModel):
+    baseline_month: int
+    new_month: int
+    new_image_base64: Optional[str] = None
+
+
+class CompareOutput(BaseModel):
+    success: bool
+    new_posture_score: float
+    delta: Dict[str, Any]
+    report: Dict[str, Any]
+    ai_report: Optional[Dict[str, Any]] = None
+    new_analysis_db_payload: Optional[Dict[str, Any]] = None
+
+    model_config = ConfigDict(from_attributes=True)

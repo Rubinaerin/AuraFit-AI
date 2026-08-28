@@ -1,11 +1,15 @@
 import api from "./api";
 
 export const postureService = {
-  // Tekli fotoğraf analizi - "file" ve "angle" parametreleri birebir eşleşmeli
-  async analyzeSingle(file, angle) {
+  /**
+   * Single-angle posture analysis
+   * Sends image file, view angle, and tracking month to backend
+   */
+  async analyzeSingle(file, angle, monthNumber = 1) {
     const form = new FormData();
-    form.append("file", file); // FastAPI backend: file: UploadFile
-    form.append("angle", angle); // FastAPI backend: angle: str
+    form.append("file", file);
+    form.append("angle", angle);
+    form.append("month_number", String(monthNumber));
 
     const { data } = await api.post("/analysis/posture/single", form, {
       headers: {
@@ -15,14 +19,18 @@ export const postureService = {
     return data;
   },
 
-  // Çoklu fotoğraf analizi - Açı isimleri ("front", "back" vb.) dosya anahtarı (key) olmalı
-  async analyzeMulti(photosByAngle) {
+  /**
+   * Multi-angle posture analysis (2-4 photos)
+   * Maps angle keys directly as file payload parameters
+   */
+  async analyzeMulti(photosByAngle, monthNumber = 1) {
     const form = new FormData();
     ["front", "back", "left", "right"].forEach((angle) => {
       if (photosByAngle[angle]) {
-        form.append(angle, photosByAngle[angle]); // FastAPI backend: front: Optional[UploadFile] vb.
+        form.append(angle, photosByAngle[angle]);
       }
     });
+    form.append("month_number", String(monthNumber));
 
     const { data } = await api.post("/analysis/posture/multi", form, {
       headers: {
@@ -32,7 +40,9 @@ export const postureService = {
     return data;
   },
 
-  // Gelişim karşılaştırma analizi
+  /**
+   * Posture progress comparison between baseline and target month
+   */
   async comparePosture({
     photo,
     angle,
@@ -41,7 +51,7 @@ export const postureService = {
     provider = "auto",
   }) {
     const form = new FormData();
-    form.append("new_photo", photo); // FastAPI backend: new_photo: UploadFile
+    form.append("new_photo", photo);
     form.append("angle", angle);
     form.append("new_month_number", String(newMonthNumber));
     form.append("baseline_month", String(baselineMonth));

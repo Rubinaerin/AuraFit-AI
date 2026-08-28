@@ -24,7 +24,11 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
-# .env dosyasını zorla yükle
+_ENV_PATH = Path(__file__).parent / ".env"
+_ROOT_ENV_PATH = Path(__file__).parent.parent / ".env"
+
+load_dotenv(_ENV_PATH, override=True)
+load_dotenv(_ROOT_ENV_PATH, override=True)
 load_dotenv(override=True)
 
 # ---- Lazy import ----
@@ -356,12 +360,13 @@ def _build_db_payloads(
 # ─── LLM Çağrı Fonksiyonları ─────────────────────────────────────────────────
 
 async def _call_openai(system_prompt: str, user_prompt: str) -> str:
+    api_key = os.getenv("OPENAI_API_KEY") or getattr(settings, "openai_api_key", None)
     if not _OPENAI_AVAILABLE:
         raise RuntimeError("openai package is not installed: pip install openai")
-    if not settings.openai_api_key:
+    if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not defined in .env file.")
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = AsyncOpenAI(api_key=api_key)
     response = await client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -423,16 +428,20 @@ async def generate_workout_plan(
     user_prompt   = _build_user_prompt(data)
 
     # Provider selection
+    openai_key = os.getenv("OPENAI_API_KEY") or getattr(settings, "openai_api_key", None)
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY") or getattr(settings, "anthropic_api_key", None)
+
+    print(f"DEBUG -> OpenAI Available: {_OPENAI_AVAILABLE}, Key Found: {bool(openai_key)}")
+
     provider = preferred_provider
     if provider == "auto":
-        if _OPENAI_AVAILABLE and getattr(settings, "openai_api_key", None):
+        if _OPENAI_AVAILABLE and openai_key:
             provider = "openai"
-        elif _ANTHROPIC_AVAILABLE and getattr(settings, "anthropic_api_key", None):
+        elif _ANTHROPIC_AVAILABLE and anthropic_key:
             provider = "anthropic"
         else:
             raise RuntimeError(
-                "No LLM API key found. "
-                "Please add OPENAI_API_KEY or ANTHROPIC_API_KEY to your .env file."
+                f"No LLM API key found. (OpenAI Installed: {_OPENAI_AVAILABLE}, Key Loaded: {bool(openai_key)})"
             )
 
     # LLM Call
@@ -488,4 +497,68 @@ def preview_prompt(data: WorkoutPlanInput) -> dict[str, str]:
     return {
         "system_prompt": _load_system_prompt(),
         "user_prompt":   _build_user_prompt(data),
+    }
+async def generate_posture_comparison_report(
+    baseline_metrics: dict, 
+    new_metrics: dict, 
+    score_change: float
+) -> dict:
+    """
+    Generates AI Coach assessment report based on posture comparison metrics.
+    Tries OpenAI first (using loaded credits), falls back to Gemini or default mock.
+    """
+    prompt = f"""
+You are an expert posture coach for AuraFit AI.
+Analyze these posture metric changes between Baseline and Current Month:
+- Score Change: {score_change:+.1f} points
+- Metrics Data: {new_metrics}
+
+Generate a concise assessment JSON matching strictly this format:
+{{
+  "overall_verdict": "One sentence summary of overall progress.",
+  "score_change_comment": "Detailed comment on why the score changed.",
+  "highlights": ["1-2 positive improvements observed"],
+  "areas_to_focus": ["1-2 posture areas that still need work"],
+  "motivational_note": "A short encouraging closing note.",
+  "next_month_tips": ["Tip 1 for next month", "Tip 2 for next month"]
+}}
+Return ONLY valid JSON in English.
+"""
+
+   # 1. Try OpenAI (Primary)
+    openai_key = os.getenv("OPENAI_API_KEY") or getattr(settings, "openai_api_key", None)
+    if _OPENAI_AVAILABLE and openai_key:
+        try:
+            client = AsyncOpenAI(api_key=openai_key)
+            resp = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                response_format={"type": "json_object"},
+            )
+            return json.loads(resp.choices[0].message.content)
+        except Exception as e:
+            print(f"OpenAI Posture Report Error: {e}")
+
+    # 2. Fallback to Gemini
+    api_key = getattr(settings, "gemini_api_key", None) or os.getenv("GEMINI_API_KEY")
+    if api_key:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-2.0-flash')
+            response = await model.generate_content_async(prompt)
+            clean_text = _extract_json(response.text)
+            return json.loads(clean_text)
+        except Exception as e:
+            print(f"Gemini API Fallback Triggered: {e}")
+
+    # 3. Static Fallback if both APIs fail
+    return {
+        "overall_verdict": "Progress analysis completed based on computer vision metrics.",
+        "score_change_comment": f"Your posture score changed by {score_change:+.1f} points.",
+        "highlights": ["Computer vision posture calculations completed successfully."],
+        "areas_to_focus": ["Maintain daily posture awareness exercises."],
+        "motivational_note": "Consistency is key to long-term ergonomic improvements!",
+        "next_month_tips": ["Perform daily chest stretches", "Adjust monitor eye-level alignment"]
     }

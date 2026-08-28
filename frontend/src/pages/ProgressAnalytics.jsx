@@ -81,7 +81,8 @@ export default function ProgressAnalytics() {
         newMonthNumber: newMonth,
         baselineMonth,
       });
-      setResult(data);
+
+      setResult(data?.report || data);
       toast.success("Progress comparison complete!");
     } catch (err) {
       toast.error(err.message || "Comparison failed.");
@@ -89,6 +90,11 @@ export default function ProgressAnalytics() {
       setLoading(false);
     }
   };
+
+  /* ── Safely derive AI report and counts ── */
+  const report = result?.ai_report || result?.report?.ai_report || {};
+  const improvedCount = result?.improved_count ?? 0;
+  const worsenedCount = result?.worsened_count ?? 0;
 
   /* ── Build chart datasets from result ── */
   const deltaBarData = result
@@ -109,10 +115,6 @@ export default function ProgressAnalytics() {
           current:  Math.abs(v?.new ?? 0),
         }))
     : [];
-
-  const report = result?.ai_report || {};
-  const improvedCount = result?.improved_count ?? 0;
-  const worsenedCount = result?.worsened_count ?? 0;
 
   return (
     <>

@@ -1,14 +1,14 @@
 """
-progress_service.py — Aylık Postür Gelişim Karşılaştırma Servisi
+progress_service.py — Monthly Posture Progress Comparison Service
 
-Ne yapar:
-  1. Kullanıcının baseline (1. ay) metriklerini alır.
-  2. Yeni fotoğrafı cv_service ile analiz eder.
-  3. Metrik farklarını (delta) hesaplar.
-  4. LLM'e gönderip Türkçe gelişim raporu üretir.
-  5. comparison_delta JSONB alanına kaydedilmek üzere hazır payload döner.
+Functionality:
+  1. Fetches user's baseline (Month 1) posture metrics.
+  2. Analyzes the new photo using cv_service.
+  3. Calculates metric changes (deltas).
+  4. Sends metrics to LLM to generate an English progress report.
+  5. Returns payload ready to be saved into the comparison_delta JSONB field.
 
-Kullanım (main.py içinden):
+Usage (from main.py):
     from progress_service import compare_posture, CompareInput, CompareOutput
 """
 
@@ -19,6 +19,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from ai_service import generate_posture_comparison_report
 
 try:
     from openai import AsyncOpenAI
@@ -48,23 +49,23 @@ def _load_report_prompt() -> str:
             _PROMPT_PATH.read_text(encoding="utf-8")
             if _PROMPT_PATH.exists()
             else (
-                "Kullanıcının iki aylık postür metriklerini karşılaştır. "
-                "Yalnızca JSON olarak yanıt ver."
+                "Compare the user's two-month posture metrics. "
+                "Respond strictly in JSON format in English."
             )
         )
     return _CACHED_PROMPT
 
 
-# ─── Veri Sınıfları ───────────────────────────────────────────────────────────
+# ─── Data Classes ──────────────────────────────────────────────────────────────
 
 @dataclass
 class BaselineMetrics:
     """
-    1. aya ait (veya önceki ölçüme ait) postür metrikleri.
-    photo_analyses tablosunun body_measurements JSONB sütunundan doldurulur.
+    Posture metrics belonging to Month 1 (or prior baseline measurement).
+    Populated from the body_measurements JSONB column in photo_analyses table.
     """
     posture_score: float
-    month_number: int                            # Hangi aya ait (1 = başlangıç)
+    month_number: int                            # Target month (1 = baseline)
     photo_angle: str = "front"
     shoulder_tilt_deg: Optional[float] = None
     hip_tilt_deg: Optional[float] = None
@@ -76,27 +77,27 @@ class BaselineMetrics:
 
 @dataclass
 class CompareInput:
-    """POST /analysis/posture/compare endpoint'inden gelen istek."""
+    """Request payload coming from POST /analysis/posture/compare endpoint."""
     user_id: str
     user_name: str
-    # Yeni yüklenen fotoğraf (bytes)
+    # Newly uploaded photo (bytes)
     new_photo_bytes: bytes
     photo_angle: str              # "front" | "back" | "left" | "right"
-    new_month_number: int         # Kaçıncı ay (2, 3, 4...)
-    # Baseline: DB'den çekilen önceki ay metrikleri
+    new_month_number: int         # Target month (2, 3, 4...)
+    # Baseline: Metrics fetched from DB for previous month
     baseline: BaselineMetrics
     preferred_provider: str = "auto"
 
 
 @dataclass
 class MetricDelta:
-    """Tek bir metrik için önceki-sonraki farkı."""
+    """Before-and-after difference for a single posture metric."""
     metric_name: str
     baseline_value: Optional[float]
     new_value: Optional[float]
-    delta: Optional[float]          # new - baseline (negatif = iyileşme, çoğu metrik için)
-    change_pct: Optional[float]     # Yüzde değişim
-    improved: Optional[bool]        # True = postür açısından iyileşme
+    delta: Optional[float]          # new - baseline (negative = improvement for most angles)
+    change_pct: Optional[float]     # Percentage change
+    improved: Optional[bool]        # True = posture improvement
 
     @classmethod
     def compute(
@@ -107,8 +108,8 @@ class MetricDelta:
         lower_is_better: bool = True,
     ) -> "MetricDelta":
         """
-        lower_is_better=True: açı azaldıysa improved=True (omuz tilt, baş eğimi vb.)
-        lower_is_better=False: değer arttıysa improved=True (postür skoru gibi)
+        lower_is_better=True: angle decrease means improved=True (shoulder tilt, head forward, etc.)
+        lower_is_better=False: value increase means improved=True (such as posture score)
         """
         if baseline is None or new is None:
             return cls(name, baseline, new, None, None, None)
@@ -121,7 +122,7 @@ class MetricDelta:
 
 @dataclass
 class ProgressDelta:
-    """Tüm metriklerin karşılaştırma sonuçları."""
+    """Comparison results across all posture metrics."""
     posture_score:      MetricDelta
     shoulder_tilt:      MetricDelta
     hip_tilt:           MetricDelta
@@ -148,7 +149,7 @@ class ProgressDelta:
         ]
 
     def to_dict(self) -> dict:
-        """photo_analyses.comparison_delta JSONB sütununa yazılacak sözlük."""
+        """Dictionary representation to be written to photo_analyses.comparison_delta JSONB column."""
         return {
             m.metric_name: {
                 "baseline": m.baseline_value,
@@ -164,42 +165,43 @@ class ProgressDelta:
 
 @dataclass
 class CompareOutput:
-    """compare_posture() dönüş değeri."""
+    """Return type for compare_posture()."""
     success: bool
     new_posture_score: float
     delta: ProgressDelta
-    # LLM'in ürettiği Türkçe rapor (parse edilmiş)
+    # Parsed LLM-generated report in English
     report: dict
-    # DB'ye kaydedilecek ham veri
-    new_analysis_db_payload: dict       # photo_analyses satırı
+    ai_report: Optional[dict] = field(default_factory=dict)
+    # Raw payload to be saved into database
+    new_analysis_db_payload: dict = field(default_factory=dict)
     error_message: Optional[str] = None
 
     def summary_text(self) -> str:
         """
-        Frontend için sade tek paragraf özet.
-        LLM raporu yoksa deltaları elle üretir.
+        Simple single-paragraph summary for Frontend.
+        Manually constructs deltas if LLM report is unavailable.
         """
         if self.report.get("overall_verdict"):
             return self.report["overall_verdict"]
         d = self.delta
         parts = []
         if d.posture_score.delta is not None:
-            sign = "arttı" if d.posture_score.delta > 0 else "düştü"
-            parts.append(f"Postür skorunuz {abs(d.posture_score.delta):.1f} puan {sign}.")
+            trend = "increased" if d.posture_score.delta > 0 else "decreased"
+            parts.append(f"Your posture score {trend} by {abs(d.posture_score.delta):.1f} points.")
         if d.shoulder_tilt.improved is True:
-            parts.append(f"Omuz hizası {abs(d.shoulder_tilt.delta):.1f}° düzeldi.")
-        return " ".join(parts) or "Analiz tamamlandı."
+            parts.append(f"Shoulder alignment improved by {abs(d.shoulder_tilt.delta):.1f}°.")
+        return " ".join(parts) or "Analysis completed successfully."
 
 
-# ─── Delta Hesaplayıcı ────────────────────────────────────────────────────────
+# ─── Delta Calculator ─────────────────────────────────────────────────────────
 
 def _compute_delta(baseline: BaselineMetrics, new_result: PostureResult) -> ProgressDelta:
-    """İki analiz arasındaki farkları hesaplar."""
+    """Calculates differences between two posture analyses."""
     nm = new_result.metrics
     return ProgressDelta(
         posture_score=MetricDelta.compute(
             "posture_score", baseline.posture_score, new_result.posture_score,
-            lower_is_better=False,          # Skor arttıysa iyileşme
+            lower_is_better=False,          # Score increase indicates improvement
         ),
         shoulder_tilt=MetricDelta.compute(
             "shoulder_tilt_deg", baseline.shoulder_tilt_deg, nm.shoulder_tilt_deg,
@@ -223,7 +225,7 @@ def _compute_delta(baseline: BaselineMetrics, new_result: PostureResult) -> Prog
     )
 
 
-# ─── LLM Rapor Promptu Builder ────────────────────────────────────────────────
+# ─── LLM Report Prompt Builder ────────────────────────────────────────────────
 
 def _build_report_user_prompt(
     user_name: str,
@@ -232,71 +234,71 @@ def _build_report_user_prompt(
     delta: ProgressDelta,
     month_number: int,
 ) -> str:
-    """LLM'e gönderilecek karşılaştırma verisini yapılandırılmış metne dönüştürür."""
+    """Converts structured comparison data into a formatted prompt string for LLM."""
 
     def fmt(val: Optional[float]) -> str:
-        return f"{val:.2f}" if val is not None else "ölçülmedi"
+        return f"{val:.2f}" if val is not None else "not measured"
 
     def fmt_delta(m: MetricDelta) -> str:
         if m.delta is None:
-            return "karşılaştırılamıyor (eksik veri)"
+            return "cannot compare (missing data)"
         sign = "+" if m.delta > 0 else ""
-        trend = "✓ iyileşti" if m.improved else ("✗ kötüleşti" if m.improved is False else "—")
+        trend = "✓ improved" if m.improved else ("✗ worsened" if m.improved is False else "—")
         return f"{fmt(m.baseline_value)} → {fmt(m.new_value)} (Δ {sign}{m.delta:.2f}, {m.change_pct:+.1f}%) {trend}"
 
     nm = new_result.metrics
     lines = [
-        f"## Kullanıcı: {user_name}",
-        f"## Karşılaştırma: Başlangıç (Ay {baseline.month_number}) → Şimdiki (Ay {month_number})",
-        f"## Fotoğraf açısı: {new_result.photo_angle}",
+        f"## User: {user_name}",
+        f"## Comparison: Baseline (Month {baseline.month_number}) → Current (Month {month_number})",
+        f"## Photo Angle: {new_result.photo_angle}",
         "",
-        "### Postür Skoru (0-100)",
+        "### Posture Score (0-100)",
         f"  {fmt_delta(delta.posture_score)}",
         "",
-        "### Omuz Hizası Tilt (°, düşük = iyi)",
+        "### Shoulder Tilt (°, lower = better)",
         f"  {fmt_delta(delta.shoulder_tilt)}",
         "",
-        "### Kalça Hizası Tilt (°, düşük = iyi)",
+        "### Hip Tilt (°, lower = better)",
         f"  {fmt_delta(delta.hip_tilt)}",
         "",
-        "### Omurga Lateral Sapması (°, düşük = iyi)",
+        "### Spine Lateral Deviation (°, lower = better)",
         f"  {fmt_delta(delta.spine_lateral)}",
         "",
-        "### Baş Öne Eğimi (°, düşük = iyi)",
+        "### Head Forward Lean (°, lower = better)",
         f"  {fmt_delta(delta.head_forward)}",
         "",
-        "### Gövde Eğimi (°, düşük = iyi)",
+        "### Torso Lean (°, lower = better)",
         f"  {fmt_delta(delta.torso_lean)}",
         "",
-        f"### Özet: {delta.improved_count()} metrik iyileşti, {delta.worsened_count()} metrik kötüleşti.",
+        f"### Summary: {delta.improved_count()} metrics improved, {delta.worsened_count()} metrics worsened.",
         "",
-        "Yeni ölçümdeki uyarılar:",
+        "Warnings in new measurement:",
     ]
     for w in (nm.warnings or []):
         lines.append(f"  - {w}")
     if not nm.warnings:
-        lines.append("  (yok)")
+        lines.append("  (none)")
 
-    lines.append("\nYukarıdaki verilere dayanarak system prompt'taki JSON formatında gelişim raporu yaz.")
+    lines.append("\nBased on the above data, write a progress report strictly in English in the JSON format specified in the system prompt.")
     return "\n".join(lines)
 
 
-# ─── JSON Ayıklama ────────────────────────────────────────────────────────────
+# ─── JSON Extraction Helper ───────────────────────────────────────────────────
 
 def _extract_json(text: str) -> dict:
-    """LLM metninden JSON bloğunu ayıklar ve parse eder."""
-    # Markdown kod bloğu
+    """Extracts and parses JSON block from LLM response text."""
+    # Markdown code block check
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if m:
         return json.loads(m.group(1))
-    # İlk { ... son }
+    # First { to last }
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end > start:
         return json.loads(text[start: end + 1])
-    raise ValueError(f"LLM geçerli JSON döndürmedi. Ham yanıt: {text[:300]}")
+    raise ValueError(f"LLM did not return valid JSON. Raw output: {text[:300]}")
 
 
-# ─── LLM Çağrıları ───────────────────────────────────────────────────────────
+# ─── LLM Service Calls ────────────────────────────────────────────────────────
 
 async def _call_openai_report(system: str, user: str) -> str:
     client = AsyncOpenAI(api_key=settings.openai_api_key)
@@ -313,7 +315,7 @@ async def _call_openai_report(system: str, user: str) -> str:
 async def _call_anthropic_report(system: str, user: str) -> str:
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
     resp = await client.messages.create(
-        model="claude-sonnet-4-6",   # Rapor için daha kaliteli model
+        model="claude-sonnet-4-6",   # High-quality model for progress report generation
         max_tokens=1000,
         system=system,
         messages=[{"role": "user", "content": user}],
@@ -322,49 +324,13 @@ async def _call_anthropic_report(system: str, user: str) -> str:
     return resp.content[0].text
 
 
-# ─── Ana Fonksiyon ────────────────────────────────────────────────────────────
-
+# ─── Main Comparison Function ─────────────────────────────────────────────────
 async def compare_posture(data: CompareInput) -> CompareOutput:
     """
-    Yeni fotoğrafı analiz edip baseline ile karşılaştırır ve LLM raporu üretir.
-
-    main.py'de tipik kullanım:
-        # 1. Baseline'ı DB'den çek
-        row = await db.execute(
-            select(PhotoAnalysis)
-            .join(ProgressPhoto)
-            .where(
-                ProgressPhoto.user_id == current_user.id,
-                ProgressPhoto.photo_angle == angle,
-                ProgressPhoto.month_number == 1,   # Başlangıç ayı
-            )
-        )
-        analysis = row.scalar_one_or_none()
-        baseline = BaselineMetrics(
-            posture_score=analysis.posture_score,
-            month_number=1,
-            photo_angle=angle,
-            **analysis.body_measurements,   # JSONB sütununu doğrudan aç
-        )
-
-        # 2. Servisi çağır
-        new_bytes = await new_photo_file.read()
-        result = await compare_posture(CompareInput(
-            user_id=str(current_user.id),
-            user_name=current_user.full_name,
-            new_photo_bytes=new_bytes,
-            photo_angle=angle,
-            new_month_number=2,
-            baseline=baseline,
-        ))
-
-        # 3. Yeni photo_analyses satırını DB'ye kaydet
-        if result.success:
-            db.add(PhotoAnalysis(**result.new_analysis_db_payload))
-            await db.commit()
+    Analyzes the new photo, compares it with baseline, and generates an LLM report.
     """
 
-    # 1. Yeni fotoğrafı CV servisiyle analiz et
+    # 1. Analyze new photo via CV service
     new_result: PostureResult = analyze_posture(
         data.new_photo_bytes,
         photo_angle=data.photo_angle,
@@ -375,53 +341,62 @@ async def compare_posture(data: CompareInput) -> CompareOutput:
         return CompareOutput(
             success=False,
             new_posture_score=0.0,
-            delta=_compute_delta(data.baseline, new_result),  # Boş delta
+            delta=_compute_delta(data.baseline, new_result),  # Empty delta
             report={},
             new_analysis_db_payload={},
             error_message=new_result.error_message,
         )
 
-    # 2. Deltaları hesapla
+    # 2. Compute deltas
     delta = _compute_delta(data.baseline, new_result)
 
-    # 3. LLM'e rapor ürettir
-    provider = data.preferred_provider
-    if provider == "auto":
-        if _OPENAI_OK and getattr(settings, "openai_api_key", None):
-            provider = "openai"
-        elif _ANTHROPIC_OK and getattr(settings, "anthropic_api_key", None):
-            provider = "anthropic"
-        else:
-            provider = None
+    # 3. Calculate score change
+    baseline_score = getattr(data.baseline, "posture_score", 0.0)
+    new_score = new_result.posture_score
+    score_change = round(new_score - baseline_score, 1)
 
-    report: dict = {}
-    if provider:
-        system = _load_report_prompt()
-        user_prompt = _build_report_user_prompt(
-            data.user_name, data.baseline, new_result, delta, data.new_month_number
-        )
-        try:
-            raw = (
-                await _call_openai_report(system, user_prompt)
-                if provider == "openai"
-                else await _call_anthropic_report(system, user_prompt)
-            )
-            report = _extract_json(raw)
-        except Exception as e:
-            # LLM raporu başarısız olsa da metrik sonuçları döneriz
-            report = {"error": f"Rapor üretilemedi: {e}"}
+    # 4. Generate AI Assessment Report
+    # Uses the generate_posture_comparison_report function from ai_service.py
+    ai_report_data = await generate_posture_comparison_report(
+        baseline_metrics=data.baseline.to_dict() if hasattr(data.baseline, "to_dict") else {},
+        new_metrics=new_result.to_db_dict(),
+        score_change=score_change,
+    )
 
-    # 4. DB payload'unu hazırla (photo_analyses tablosu)
+    # 5. Prepare DB payload (photo_analyses table)
     cv_db = new_result.to_db_dict()
-    cv_db["comparison_delta"] = delta.to_dict()   # JSONB sütunu
+    cv_db["comparison_delta"] = delta.to_dict()   # JSONB column
+
+    # 6. Format formatted metrics mapping for frontend compatibility
+    # Ensure keys match: shoulder_tilt_deg, hip_tilt_deg, etc.
+    metrics_map = {}
+    delta_dict = delta.to_dict() if hasattr(delta, "to_dict") else {}
+    for key, val in delta_dict.items():
+        metrics_map[key] = {
+            "baseline": getattr(data.baseline, key, 0.0),
+            "new": getattr(new_result, key, 0.0),
+            "delta": val,
+        }
+
+    # Construct structured payload for frontend
+    frontend_payload = {
+        "scores": {
+            "baseline_score": baseline_score,
+            "new_score": new_score,
+            "score_change": score_change,
+        },
+        "metrics": metrics_map,
+        "ai_report": ai_report_data,
+        "improved_count": sum(1 for v in delta_dict.values() if isinstance(v, (int, float)) and v < 0),
+        "worsened_count": sum(1 for v in delta_dict.values() if isinstance(v, (int, float)) and v > 0),
+        "summary": ai_report_data.get("overall_verdict", ""),
+    }
 
     return CompareOutput(
         success=True,
-        new_posture_score=new_result.posture_score,
+        new_posture_score=new_score,
         delta=delta,
-        report=report,
-        new_analysis_db_payload={
-            **cv_db,
-            # Çağıran katman photo_id'yi ekler
-        },
+        report=frontend_payload,
+        ai_report=ai_report_data or {},
+        new_analysis_db_payload={**cv_db}
     )

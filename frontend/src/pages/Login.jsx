@@ -4,7 +4,7 @@
  * Layout: Full-screen split panel. Left side (hidden on mobile) renders the
  * AuraFit AI brand hero with animated metric cards. Right side hosts the
  * secure credential form. On successful authentication the user is routed
- * to /posture; errors are surfaced via react-hot-toast.
+ * to /posture; errors are surfaced via react-hot-toast and an in-form error banner.
  *
  * Auth flow:
  *   POST /auth/login  →  stores JWT in localStorage via authService  →
@@ -25,6 +25,7 @@ import {
   Zap,
   TrendingUp,
   ScanFace,
+  AlertCircle,
 } from "lucide-react";
 
 import { useAuth } from "../hooks/useAuth";
@@ -63,13 +64,17 @@ export default function Login() {
   const [password, setPassword]   = useState("");
   const [showPass, setShowPass]   = useState(false);
   const [loading, setLoading]     = useState(false);
+  const [errorMessage, setErrorMessage] = useState(""); // Local error state for UI banner
 
   // ── Submission handler ──────────────────────────────────────────────────────
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setErrorMessage(""); // Clear previous error messages
 
     if (!email.trim() || !password) {
-      toast.error("Please enter both your email address and password.");
+      const msg = "Please enter both your email address and password.";
+      setErrorMessage(msg);
+      toast.error(msg);
       return;
     }
 
@@ -78,7 +83,7 @@ export default function Login() {
       const { data } = await api.post("/auth/login", { email, password });
       localStorage.setItem("fitcore_token", data.access_token);
 
-      // AuthContext state'ini doğrudan backend'den gelen kullanıcı verisiyle besliyoruz
+      // Hydrate global AuthContext state with user data returned from backend
       if (setUser) {
         setUser(data.user);
       }
@@ -86,8 +91,14 @@ export default function Login() {
       toast.success(`Welcome back, ${data.user?.full_name?.split(" ")[0] || "Athlete"}!`);
       navigate("/posture");
     } catch (err) {
-      // err.message is normalised by the Axios interceptor in api.js
-      toast.error(err.message || "Authentication failed. Please check your credentials.");
+   const detail = err.response?.data?.detail;
+      const message =
+        (typeof detail === "object" ? detail?.message : detail) ||
+        err.message ||
+        "Invalid email or password. Please check your credentials.";
+
+      setErrorMessage(message);
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -145,7 +156,7 @@ export default function Login() {
 
         {/* Footer tagline */}
         <p className="text-xs text-text-muted relative z-10">
-          Istanbul Okan University · Software Engineering Graduation Project · 2025
+          Istanbul Okan University · Software Engineering Graduation Project · 2027
         </p>
       </div>
 
@@ -168,9 +179,17 @@ export default function Login() {
           <h2 className="font-display text-2xl font-bold text-text-primary mb-1">
             Sign In
           </h2>
-          <p className="text-sm text-text-secondary mb-8">
+          <p className="text-sm text-text-secondary mb-6">
             Access your personalised fitness command centre.
           </p>
+
+          {/* Dynamic Error Alert Banner */}
+          {errorMessage && (
+            <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 flex items-start gap-2.5 animate-fadeIn">
+              <AlertCircle size={18} className="shrink-0 mt-0.5" />
+              <p className="text-xs font-medium leading-relaxed">{errorMessage}</p>
+            </div>
+          )}
 
           {/* Form */}
           <form onSubmit={handleSubmit} noValidate className="space-y-4">

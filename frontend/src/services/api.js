@@ -21,7 +21,11 @@ api.interceptors.request.use(
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    // Check if the request was sent to the login endpoint
+    const isLoginEndpoint = error.config?.url?.includes("/auth/login");
+
+    // Do NOT redirect to /login if the request itself was a login attempt
+    if (error.response?.status === 401 && !isLoginEndpoint) {
       localStorage.removeItem("fitcore_token");
       window.location.href = "/login";
     }

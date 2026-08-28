@@ -32,7 +32,7 @@ from schemas import RegisterRequest, RegisterResponse, UserResponse, HealthCondi
 from services import EmailAlreadyExistsError, register_user, verify_password, create_access_token, update_user_profile
 from chat_service import chat_with_coach, ChatInput, HealthConditionCtx, ActivePlanCtx
 from progress_service import compare_posture, CompareInput, BaselineMetrics
-
+from models import PhotoAnalysis, ProgressPhoto, User
 settings = get_settings()
 security = HTTPBearer()
 
@@ -272,7 +272,6 @@ from cv_service import analyze_posture, analyze_multi_angle, combined_posture_sc
  
  
 # ─── POST /analysis/posture/single ──────────────────────────────────────────
-# Tek açıdan fotoğraf analizi
  
 @app.post(
     "/analysis/posture/single",
@@ -281,8 +280,10 @@ from cv_service import analyze_posture, analyze_multi_angle, combined_posture_sc
 )
 async def analyze_single_photo(
     current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
     file: UploadFile = File(..., description="JPG/PNG fotoğraf"),
     angle: str = Form("front", description="front | back | left | right"),
+    month_number: int = Form(1, description="Month number for tracking baseline/progress (defaults to 1)"),
 ):
     if angle not in ("front", "back", "left", "right"):
         raise HTTPException(status_code=422, detail="Geçersiz açı. front/back/left/right kullanın.")
@@ -299,9 +300,39 @@ async def analyze_single_photo(
  
     if not result.success:
         raise HTTPException(status_code=422, detail=result.error_message)
+
+    # Save photo record to progress_photos table
+    image_path_val = f"uploads/{current_user.id}/{file.filename}"
+
+    progress_photo = ProgressPhoto(
+        user_id=current_user.id,
+        photo_angle=angle,
+        month_number=month_number,
+        image_path=image_path_val,
+        storage_path=image_path_val,
+        storage_bucket="fitness-app-photos"
+    )
+    db.add(progress_photo)
+    await db.flush()  # Obtain the generated photo_id
+    await db.flush()  # Obtain the generated photo_id
+
+# Save analysis metrics to photo_analyses table
+    db_payload = result.to_db_dict()
+    photo_analysis = PhotoAnalysis(
+        photo_id=progress_photo.id,
+        posture_score=result.posture_score,
+        posture_landmarks=db_payload.get("posture_landmarks"),
+        body_measurements=db_payload.get("body_measurements"),
+        metrics_json=db_payload.get("metrics_json"),
+    )
+    db.add(photo_analysis)
+    await db.commit()
+    await db.refresh(progress_photo)
  
     return {
         "user_id": str(current_user.id),
+        "photo_id": str(progress_photo.id),
+        "month_number": month_number,
         "photo_angle": result.photo_angle,
         "posture_score": result.posture_score,
         "metrics": {
@@ -314,41 +345,72 @@ async def analyze_single_photo(
         },
         "warnings": result.metrics.warnings,
         "detection_confidence": result.metrics.detection_confidence,
-        "db_payload": result.to_db_dict(),   # photo_analyses tablosuna doğrudan kaydet
+        "db_payload": db_payload,
     }
  
  
 # ─── POST /analysis/posture/multi ───────────────────────────────────────────
-# 2–4 açıdan toplu analiz → birleşik skor
- 
+
 @app.post(
     "/analysis/posture/multi",
-    summary="Çok açılı postür analizi (2-4 fotoğraf)",
-    tags=["analiz"],
+    summary="Multi-angle posture analysis (2-4 photos)",
+    tags=["analysis"],
 )
 async def analyze_multi_photos(
     current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
     front: Optional[UploadFile] = File(None),
     back:  Optional[UploadFile] = File(None),
     left:  Optional[UploadFile] = File(None),
     right: Optional[UploadFile] = File(None),
+    month_number: int = Form(1, description="Month number for progress tracking (defaults to 1)"),
 ):
     photos: dict = {}
-    for angle, upload in [("front", front), ("back", back), ("left", left), ("right", right)]:
+    uploads: dict = {"front": front, "back": back, "left": left, "right": right}
+
+    for angle, upload in uploads.items():
         if upload is not None:
             photos[angle] = await upload.read()
- 
+
     if not photos:
-        raise HTTPException(status_code=422, detail="En az bir fotoğraf yükleyin.")
- 
+        raise HTTPException(status_code=422, detail="Please upload at least one photo.")
+
     results = analyze_multi_angle(photos, return_annotated=False)
     overall_score = combined_posture_score(results)
- 
-    # Tüm uyarıları birleştir (tekrar eden uyarıları ayıkla)
+
+    # Persist all analyzed angles to the database
+    for angle, result in results.items():
+        if result.success:
+            file_obj = uploads[angle]
+            filename = file_obj.filename if file_obj else f"{angle}.jpg"
+
+            progress_photo = ProgressPhoto(
+                user_id=current_user.id,
+                photo_angle=angle,
+                month_number=month_number,
+                image_path=f"uploads/{current_user.id}/{filename}"
+            )
+            db.add(progress_photo)
+            await db.flush()
+
+            db_payload = result.to_db_dict()
+            photo_analysis = PhotoAnalysis(
+                photo_id=progress_photo.id,
+                posture_score=result.posture_score,
+                posture_landmarks=db_payload.get("posture_landmarks"),
+                body_measurements=db_payload.get("body_measurements"),
+                metrics_json=db_payload.get("metrics_json"),
+            )
+            db.add(photo_analysis)
+
+    await db.commit()
+
+    # Consolidate unique warnings across all analyzed angles
     all_warnings = list({w for r in results.values() for w in r.metrics.warnings})
- 
+
     return {
         "user_id": str(current_user.id),
+        "month_number": month_number,
         "overall_posture_score": overall_score,
         "per_angle": {
             angle: {
@@ -679,18 +741,28 @@ async def compare_posture_endpoint(
     """
     from sqlalchemy import select as sa_select
 
-    # ── File validation ───────────────────────────────────────────────────
+   # ── File validation ───────────────────────────────────────────────────
     if angle not in ("front", "back", "left", "right"):
-        raise HTTPException(status_code=422, detail="Invalid angle. Allowed values: front, back, left, right.")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
+            detail="Invalid angle. Allowed values: front, back, left, right."
+        )
+        
     if new_photo.content_type not in ("image/jpeg", "image/png", "image/webp"):
-        raise HTTPException(status_code=415, detail="Unsupported media type. Only JPG, PNG, or WebP files are allowed.")
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, 
+            detail="Unsupported media type. Only JPG, PNG, or WebP files are allowed."
+        )
 
     photo_bytes = await new_photo.read()
     if len(photo_bytes) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="File size exceeds maximum allowed limit of 10 MB.")
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, 
+            detail="File size exceeds maximum allowed limit of 10 MB."
+        )
 
     # ── Retrieve Baseline Analysis from DB ────────────────────────────────
-    baseline_row = await db.execute(
+    stmt = (
         sa_select(PhotoAnalysis)
         .join(ProgressPhoto, PhotoAnalysis.photo_id == ProgressPhoto.id)
         .where(
@@ -701,14 +773,31 @@ async def compare_posture_endpoint(
         .order_by(PhotoAnalysis.analyzed_at.desc())
         .limit(1)
     )
+    
+    baseline_row = await db.execute(stmt)
     baseline_analysis = baseline_row.scalar_one_or_none()
+
+    # Fallback: If exact baseline month isn't found, pick the latest available analysis for this angle
+    if not baseline_analysis:
+        fallback_stmt = (
+            sa_select(PhotoAnalysis)
+            .join(ProgressPhoto, PhotoAnalysis.photo_id == ProgressPhoto.id)
+            .where(
+                ProgressPhoto.user_id == current_user.id,
+                ProgressPhoto.photo_angle == angle,
+            )
+            .order_by(ProgressPhoto.month_number.asc(), PhotoAnalysis.analyzed_at.desc())
+            .limit(1)
+        )
+        fallback_row = await db.execute(fallback_stmt)
+        baseline_analysis = fallback_row.scalar_one_or_none()
 
     if not baseline_analysis:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=(
                 f"No baseline analysis found for month {baseline_month} and angle '{angle}'. "
-                "Please upload a baseline photo first using the /analysis/posture/single endpoint."
+                "Please upload a baseline photo first using the Posture Studio tab."
             ),
         )
 
@@ -744,6 +833,7 @@ async def compare_posture_endpoint(
     new_photo_row = ProgressPhoto(
         user_id=current_user.id,
         photo_angle=angle,
+        image_path=f"users/{current_user.id}/photos/month_{new_month_number}_{angle}.jpg",
         storage_path=f"users/{current_user.id}/photos/month_{new_month_number}_{angle}.jpg",
         storage_bucket="fitness-app-photos",
         month_number=new_month_number,

@@ -157,7 +157,7 @@ export default function PostureStudio() {
     localStorage.removeItem("latest_posture_results");
   };
 
-  const analyzeAll = async () => {
+ const analyzeAll = async () => {
     const toAnalyze = Object.entries(photos).filter(([, f]) => f);
     if (!toAnalyze.length) { 
       toast.error("Upload at least one photo first."); 
@@ -169,7 +169,8 @@ export default function PostureStudio() {
     for (const [angle, file] of toAnalyze) {
       setLoading((l) => ({ ...l, [angle]: true }));
       try {
-        const data = await postureService.analyzeSingle(file, angle);
+        // Pass monthNumber explicitly as 1 so backend treats this as baseline
+        const data = await postureService.analyzeSingle(file, angle, 1);
         updatedResults[angle] = data;
         setResults((r) => ({ ...r, [angle]: data }));
         toast.success(`${angle.charAt(0).toUpperCase() + angle.slice(1)} view analyzed successfully!`);
@@ -203,7 +204,6 @@ export default function PostureStudio() {
       JSON.stringify({ results: updatedResults, overallScore: calculatedOverall })
     );
   };
-
   const analyzedCount = Object.values(results).filter(Boolean).length;
 
   return (

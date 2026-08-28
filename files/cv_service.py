@@ -23,9 +23,8 @@ from pathlib import Path
 from typing import Optional
 
 import cv2
-import mediapipe as mp
 import numpy as np
-
+import mediapipe as mp
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -173,14 +172,14 @@ class PoseDetector:
     def __init__(self, min_detection_confidence: float = 0.5, min_tracking_confidence: float = 0.5):
         self._mp_pose = mp.solutions.pose
         self._mp_draw = mp.solutions.drawing_utils
+
         self._pose = self._mp_pose.Pose(
-            static_image_mode=True,          # Photo analysis → tracking disabled
-            model_complexity=2,              # 0/1/2 — 2 is most accurate, slower
+            static_image_mode=True,
+            model_complexity=2,
             enable_segmentation=False,
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
         )
-
     def detect(self, image_bgr: np.ndarray) -> tuple[bool, dict, np.ndarray]:
         """
         Performs landmark detection on a BGR image.

@@ -12,4 +12,5 @@ frontend/node_modules/.cache/
 # Build & Log
 build/
 dist/
-*.log
+*.logfiles/venv/
+venv/
