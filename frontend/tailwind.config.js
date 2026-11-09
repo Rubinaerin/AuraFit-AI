@@ -1,64 +1,43 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
-  content: ["./src/**/*.{js,jsx,ts,tsx}", "./public/index.html"],
+  content: [
+    "./src/**/*.{js,jsx,ts,tsx}",
+  ],
   theme: {
     extend: {
       colors: {
-        base:    "#0A0A0F",
-        surface: "#12121A",
-        card:    "#1E1E2E",
-        "card-hover": "#252538",
-        border:  "#2A2A3E",
+        base: '#0B0F17', // veya projenizdeki arka plan rengi
+        surface: '#151C28',
+        card: {
+          DEFAULT: '#1E293B',
+          hover: '#334155',
+        },
+        border: '#334155',
         primary: {
-          DEFAULT: "#6C63FF",
-          dim:     "#6C63FF22",
-          hover:   "#7C74FF",
+          DEFAULT: '#6C63FF',
+          hover: '#5B54E0',
         },
-        accent: {
-          DEFAULT: "#00D4AA",
-          dim:     "#00D4AA18",
-        },
-        danger: {
-          DEFAULT: "#FF4757",
-          dim:     "#FF475718",
-        },
-        warning: {
-          DEFAULT: "#FFB347",
-          dim:     "#FFB34718",
-        },
-        "warning-dim": "#FFB34714",
+        accent: '#00D4AA',
+        danger: '#FF5252',
+        warning: '#FFB020',
         text: {
-          primary:   "#F5F5F5",
-          secondary: "#9999BB",
-          muted:     "#55556A",
+          primary: '#F8FAFC',
+          secondary: '#94A3B8',
+          muted: '#64748B',
         },
-      },
-      fontFamily: {
-        display: ["'Space Grotesk'", "sans-serif"],
-        body:    ["'Inter'", "sans-serif"],
-      },
-      backgroundImage: {
-        "glow-primary": "radial-gradient(ellipse at center, #6C63FF22 0%, transparent 70%)",
-        "glow-accent":  "radial-gradient(ellipse at center, #00D4AA18 0%, transparent 70%)",
-        "card-gradient": "linear-gradient(135deg, #1E1E2E 0%, #1A1A28 100%)",
       },
       boxShadow: {
-        "glow-primary": "0 0 20px #6C63FF33",
-        "glow-accent":  "0 0 20px #00D4AA22",
-        "card":         "0 4px 24px rgba(0,0,0,0.4)",
-        "card-hover":   "0 8px 32px rgba(0,0,0,0.6)",
+        card: '0 4px 20px rgba(0, 0, 0, 0.25)',
+        'card-hover': '0 8px 30px rgba(0, 0, 0, 0.35)',
+        'glow-primary': '0 0 20px rgba(108, 99, 255, 0.4)',
+      },
+      fontFamily: {
+        display: ['Space Grotesk', 'sans-serif'],
       },
       animation: {
-        "pulse-slow":   "pulse 3s cubic-bezier(0.4,0,0.6,1) infinite",
-        "fade-in":      "fadeIn 0.3s ease-out",
-        "slide-up":     "slideUp 0.4s ease-out",
-        "spin-slow":    "spin 8s linear infinite",
-      },
-      keyframes: {
-        fadeIn:  { "0%": { opacity: 0 }, "100%": { opacity: 1 } },
-        slideUp: { "0%": { opacity: 0, transform: "translateY(12px)" }, "100%": { opacity: 1, transform: "translateY(0)" } },
+        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
       },
     },
   },
   plugins: [],
-};
+}

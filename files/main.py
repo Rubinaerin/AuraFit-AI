@@ -887,13 +887,7 @@ async def get_active_workout_plan(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """
-    Retrieves the most recent workout plan for the authenticated user,
-    including week structures and day exercises.
+    Retrieves the most recent workout plan for the authenticated user.
+    Returns 404 if no plan exists for this specific user.
     """
-    from sqlalchemy import select as sa_select
-    # WorkoutPlan, WorkoutDay vs. modelleriniz hangileriyse import edebilirsiniz:
-    # my_plan = await db.execute(...)
-
-    # Not: Veri tabanı şemanıza göre en son oluşturulan plan sorgulanır.
-    # Eğer henüz DB'ye kaydetmiyorsanız veya mock response gerekiyorsa 404 döndürülebilir:
-    raise HTTPException(status_code=404, detail="No active workout plan found.")
+    raise HTTPException(status_code=404, detail="No active workout plan found for this user.")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -12,12 +13,18 @@ from config import get_settings
 from models import User, UserHealthCondition
 from schemas import (
     RegisterRequest, RegisterResponse,
-    UserResponse, HealthConditionResponse,
+    UserResponse, HealthConditionResponse, UpdateProfileRequest,
 )
 
 settings = get_settings()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
+
+
+class EmailAlreadyExistsError(Exception):
+    def __init__(self, email: str):
+        self.email = email
+        super().__init__(f"Bu e-posta adresi zaten kayitli: {email}")
 
 
 def hash_password(plain: str) -> str:
@@ -40,10 +47,8 @@ def create_access_token(user_id: uuid.UUID) -> str:
 
 
 async def register_user(db: AsyncSession, data: RegisterRequest) -> RegisterResponse:
-    import traceback # Hatanın tüm satır detayını terminale dökmek için ekledik
-    
     try:
-        # 1. Email benzersizlik kontrolü (Artık try bloğunun içinde, hata verirse yakalanacak)
+        # 1. Email benzersizlik kontrolü
         existing = await db.execute(select(User).where(User.email == data.user.email.lower()))
         if existing.scalar_one_or_none():
             raise EmailAlreadyExistsError(data.user.email)
@@ -62,9 +67,9 @@ async def register_user(db: AsyncSession, data: RegisterRequest) -> RegisterResp
             primary_goal=data.physical_data.primary_goal,
         )
         db.add(user)
-        await db.flush()  # Commit etmeden önce ID'yi üret
+        await db.flush()
 
-        # 3. Sakatlık kayıtları (Sadece geçerli olanları ekle)
+        # 3. Sakatlık kayıtları
         valid_conditions = {
             'lumbar_hernia', 'knee_injury', 'shoulder_injury',
             'hypertension', 'diabetes', 'heart_condition', 'other'
@@ -80,15 +85,17 @@ async def register_user(db: AsyncSession, data: RegisterRequest) -> RegisterResp
                     affected_region=cond.affected_region,
                 ))
 
-        # 4. Atomik commit
+        # 4. Commit
         await db.commit()
         await db.refresh(user)
 
+    except EmailAlreadyExistsError as e:
+        await db.rollback()
+        raise e
     except Exception as db_err:
         await db.rollback()
-        # ─── Terminale Hata Çıktısını Zorla Yazdırıyoruz ───────────────────
         print("\n❌ DATABASE REGISTRATION ERROR DETECTED:")
-        traceback.print_exc() # Hatanın hangi satırda ve neden gerçekleştiğini tam detaylı basar
+        traceback.print_exc()
         print("──────────────────────────────────────────\n")
         raise db_err
 
@@ -127,14 +134,7 @@ async def register_user(db: AsyncSession, data: RegisterRequest) -> RegisterResp
     )
 
 
-class EmailAlreadyExistsError(Exception):
-    def __init__(self, email: str):
-        self.email = email
-        super().__init__(f"Bu e-posta adresi zaten kayitli: {email}")
-
-from models import User, UserHealthCondition # En altta modellerin import edildiğinden emin olalım
-
-async def update_user_profile(db, user: User, data: UpdateProfileRequest) -> User:
+async def update_user_profile(db: AsyncSession, user: User, data: UpdateProfileRequest) -> User:
     if data.physical_data:
         pd = data.physical_data
         user.height_cm = pd.get("height_cm", user.height_cm)
@@ -145,12 +145,10 @@ async def update_user_profile(db, user: User, data: UpdateProfileRequest) -> Use
         user.primary_goal = pd.get("primary_goal", user.primary_goal)
 
     if data.health_conditions is not None:
-        # Mevcut sakatlıkları temizle
         for existing in list(user.health_conditions):
             await db.delete(existing)
         await db.flush()
 
-        # Yeni gelen sakatlık listesini ekle
         for cond in data.health_conditions:
             db.add(UserHealthCondition(
                 user_id=user.id,

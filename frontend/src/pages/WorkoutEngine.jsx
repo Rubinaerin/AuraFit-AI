@@ -170,20 +170,29 @@ export default function WorkoutEngine() {
     preferred_provider: "auto",
   });
 
-  // Load existing active plan on page mount
+  // User-specific storage key to prevent cross-account plan leaking
+  const userPlanStorageKey = user?.id ? `aurafit_active_plan_${user.id}` : null;
+
+  // Load existing active plan on page mount or user change
   useEffect(() => {
     async function loadActivePlan() {
       setFetchingActive(true);
+      setPlan(null); // Reset plan state on user switch
+
+      if (!user?.id) {
+        setFetchingActive(false);
+        return;
+      }
+
       try {
-        // Try fetching from backend first
         let activeData = null;
         if (workoutService.getActivePlan) {
           activeData = await workoutService.getActivePlan();
         }
 
-        // Fallback to local storage if API returns empty
-        if (!activeData) {
-          const cached = localStorage.getItem("aurafit_active_plan");
+        // User-specific local storage check
+        if (!activeData && userPlanStorageKey) {
+          const cached = localStorage.getItem(userPlanStorageKey);
           if (cached) {
             activeData = JSON.parse(cached);
           }
@@ -193,13 +202,14 @@ export default function WorkoutEngine() {
           setPlan(activeData);
         }
       } catch (err) {
-        // Fallback check on error
-        const cached = localStorage.getItem("aurafit_active_plan");
-        if (cached) {
-          try {
-            setPlan(JSON.parse(cached));
-          } catch (e) {
-            /* ignore JSON parse errors */
+        if (userPlanStorageKey) {
+          const cached = localStorage.getItem(userPlanStorageKey);
+          if (cached) {
+            try {
+              setPlan(JSON.parse(cached));
+            } catch (e) {
+              /* ignore parse error */
+            }
           }
         }
       } finally {
@@ -208,7 +218,7 @@ export default function WorkoutEngine() {
     }
 
     loadActivePlan();
-  }, []);
+  }, [user?.id, userPlanStorageKey]);
 
   const toggleEquip = (e) => {
     setOptions((o) => ({
@@ -225,7 +235,9 @@ export default function WorkoutEngine() {
     try {
       const data = await workoutService.generatePlan(options);
       setPlan(data);
-      localStorage.setItem("aurafit_active_plan", JSON.stringify(data));
+      if (userPlanStorageKey) {
+        localStorage.setItem(userPlanStorageKey, JSON.stringify(data));
+      }
       toast.success("Your AI workout plan is ready!");
     } catch (err) {
       toast.error(err.message || "Failed to generate plan.");
@@ -236,7 +248,9 @@ export default function WorkoutEngine() {
 
   const resetPlan = () => {
     setPlan(null);
-    localStorage.removeItem("aurafit_active_plan");
+    if (userPlanStorageKey) {
+      localStorage.removeItem(userPlanStorageKey);
+    }
   };
 
   const weeks = plan?.raw_plan?.weeks || [];

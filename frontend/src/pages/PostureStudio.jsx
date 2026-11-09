@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import { useOutletContext } from "react-router-dom";
 import { useDropzone } from "react-dropzone";
 import {
@@ -125,20 +125,6 @@ export default function PostureStudio() {
   const [loading, setLoading] = useState({});
   const [overallScore, setOverallScore] = useState(null);
 
-  // Load saved analysis results from localStorage on component mount
-  useEffect(() => {
-    const saved = localStorage.getItem("latest_posture_results");
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (parsed.results) setResults(parsed.results);
-        if (parsed.overallScore != null) setOverallScore(parsed.overallScore);
-      } catch (e) {
-        console.error("Failed to restore posture data", e);
-      }
-    }
-  }, []);
-
   const handleDrop = (angle, file) => {
     setPhotos((p) => ({ ...p, [angle]: file }));
     setResults((r) => ({ ...r, [angle]: null }));
@@ -157,7 +143,7 @@ export default function PostureStudio() {
     localStorage.removeItem("latest_posture_results");
   };
 
- const analyzeAll = async () => {
+  const analyzeAll = async () => {
     const toAnalyze = Object.entries(photos).filter(([, f]) => f);
     if (!toAnalyze.length) { 
       toast.error("Upload at least one photo first."); 
@@ -169,7 +155,6 @@ export default function PostureStudio() {
     for (const [angle, file] of toAnalyze) {
       setLoading((l) => ({ ...l, [angle]: true }));
       try {
-        // Pass monthNumber explicitly as 1 so backend treats this as baseline
         const data = await postureService.analyzeSingle(file, angle, 1);
         updatedResults[angle] = data;
         setResults((r) => ({ ...r, [angle]: data }));
@@ -197,13 +182,8 @@ export default function PostureStudio() {
     if (calculatedOverall != null) {
       setOverallScore(calculatedOverall);
     }
-
-    // Save state to local storage so navigation doesn't clear results
-    localStorage.setItem(
-      "latest_posture_results",
-      JSON.stringify({ results: updatedResults, overallScore: calculatedOverall })
-    );
   };
+
   const analyzedCount = Object.values(results).filter(Boolean).length;
 
   return (
@@ -315,5 +295,5 @@ export default function PostureStudio() {
         )}
       </main>
     </>
-  ); 
+  );
 }
